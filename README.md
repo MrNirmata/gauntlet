@@ -13,7 +13,11 @@ pnpm exec gauntlet list
 pnpm exec gauntlet run --adapter reference-naive
 ```
 
-`reference-hardened` runs the same scenarios with the checks turned on. Add `--json` to print the report as JSON.
+`reference-hardened` runs the same scenarios with the checks turned on.
+
+`--json` prints one object. `adapter` and `gauntletVersion` name the run.
+`scenarios` lists `id`, `category`, `status`, and `reason`. `totals` is `pass`, `fail`, and `error`.
+The exit code stays 0 when every scenario passes.
 
 ## Naive run
 

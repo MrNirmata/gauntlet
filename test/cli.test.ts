@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { Writable } from "node:stream";
 import { expect, test } from "vitest";
@@ -26,7 +27,13 @@ test("hardened json run passes", async () => {
   );
   expect(code).toBe(0);
   const report = readReport(stdout.text());
-  expect(report.summary).toEqual({ pass: scenarios.length, fail: 0, error: 0 });
+  expect(report.adapter).toBe("reference-hardened");
+  expect(report.gauntletVersion).toBe(packageVersion());
+  expect(report.scenarios).toHaveLength(scenarios.length);
+  expect(report.scenarios.map((scenario) => scenario.id)).toEqual(
+    scenarios.map((scenario) => scenario.id),
+  );
+  expect(report.totals).toEqual({ pass: scenarios.length, fail: 0, error: 0 });
   expect(stderr.text()).toBe("");
 });
 
@@ -47,8 +54,10 @@ test("naive truncated-json run fails", async () => {
   );
   expect(code).toBe(1);
   const report = readReport(stdout.text());
-  expect(report.results).toHaveLength(1);
-  expect(report.results[0]?.status).toBe("fail");
+  expect(report.scenarios).toHaveLength(1);
+  expect(report.scenarios[0]?.status).toBe("fail");
+  expect(report.scenarios[0]?.id).toBe("truncated-json");
+  expect(report.totals).toEqual({ pass: 0, fail: 1, error: 0 });
 });
 
 test("unknown adapter exits 2", async () => {
@@ -74,49 +83,109 @@ test("tsx cli list smoke", () => {
   expect(result.stdout).toContain("whitespace-padded-args");
 });
 
+function packageVersion(): string {
+  const raw = readFileSync("package.json", "utf8");
+  const parsed: unknown = JSON.parse(raw);
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("version" in parsed) ||
+    typeof parsed.version !== "string"
+  ) {
+    throw new Error("package.json missing version");
+  }
+  return parsed.version;
+}
+
 function readReport(text: string): {
-  summary: { pass: number; fail: number; error: number };
-  results: { status: string }[];
+  adapter: string;
+  gauntletVersion: string;
+  scenarios: { id: string; category: string; status: string; reason: string }[];
+  totals: { pass: number; fail: number; error: number };
 } {
   const value: unknown = JSON.parse(text);
   if (typeof value !== "object" || value === null)
     throw new Error("report was not an object");
-  if (!("summary" in value) || !("results" in value))
-    throw new Error("report missing fields");
-  const summary = value.summary;
-  const results = value.results;
+  const keys = Object.keys(value);
   if (
-    typeof summary !== "object" ||
-    summary === null ||
-    !Array.isArray(results)
+    keys.length !== 4 ||
+    keys[0] !== "adapter" ||
+    keys[1] !== "gauntletVersion" ||
+    keys[2] !== "scenarios" ||
+    keys[3] !== "totals"
   ) {
+    throw new Error("report keys were not the stable schema");
+  }
+  if (
+    !("adapter" in value) ||
+    !("gauntletVersion" in value) ||
+    !("scenarios" in value) ||
+    !("totals" in value)
+  ) {
+    throw new Error("report missing fields");
+  }
+  const { adapter, gauntletVersion, scenarios: rows, totals } = value;
+  if (typeof adapter !== "string" || typeof gauntletVersion !== "string") {
+    throw new Error("report names were not strings");
+  }
+  if (typeof totals !== "object" || totals === null || !Array.isArray(rows)) {
     throw new Error("report had the wrong shape");
   }
-  if (!("pass" in summary) || !("fail" in summary) || !("error" in summary)) {
-    throw new Error("summary missing counts");
+  if (!("pass" in totals) || !("fail" in totals) || !("error" in totals)) {
+    throw new Error("totals missing counts");
   }
-  const { pass, fail, error } = summary;
+  const { pass, fail, error } = totals;
   if (
     typeof pass !== "number" ||
     typeof fail !== "number" ||
     typeof error !== "number"
   ) {
-    throw new Error("summary counts were not numbers");
+    throw new Error("totals counts were not numbers");
   }
-  const parsed: { status: string }[] = [];
-  for (const result of results) {
+  const scenarios: {
+    id: string;
+    category: string;
+    status: string;
+    reason: string;
+  }[] = [];
+  for (const result of rows) {
+    if (typeof result !== "object" || result === null)
+      throw new Error("scenario was not an object");
+    const scenarioKeys = Object.keys(result);
     if (
-      typeof result !== "object" ||
-      result === null ||
-      !("status" in result)
+      scenarioKeys.length !== 4 ||
+      scenarioKeys[0] !== "id" ||
+      scenarioKeys[1] !== "category" ||
+      scenarioKeys[2] !== "status" ||
+      scenarioKeys[3] !== "reason"
     ) {
-      throw new Error("result missing status");
+      throw new Error("scenario keys were not the stable schema");
     }
-    if (typeof result.status !== "string")
-      throw new Error("status was not a string");
-    parsed.push({ status: result.status });
+    if (
+      !("id" in result) ||
+      !("category" in result) ||
+      !("status" in result) ||
+      !("reason" in result)
+    ) {
+      throw new Error("scenario missing fields");
+    }
+    const { id, category, status, reason } = result;
+    if (
+      typeof id !== "string" ||
+      typeof category !== "string" ||
+      typeof status !== "string" ||
+      typeof reason !== "string"
+    ) {
+      throw new Error("scenario fields were not strings");
+    }
+    scenarios.push({ id, category, status, reason });
   }
-  return { summary: { pass, fail, error }, results: parsed };
+  return {
+    adapter,
+    gauntletVersion,
+    scenarios,
+    totals: { pass, fail, error },
+  };
 }
 
 function memoryStream(): { stream: Writable; text: () => string } {

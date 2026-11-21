@@ -2,6 +2,13 @@
   "name": "gauntlet",
   "version": "0.1.0",
   "description": "Adversarial checks for the code that turns model output into a tool call.",
+  "keywords": [
+    "tool-call",
+    "llm",
+    "agents",
+    "security",
+    "benchmark"
+  ],
   "license": "MIT",
   "author": "MrNirmata",
   "type": "module",
@@ -13,7 +20,8 @@
     "gauntlet": "./dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "CHANGELOG.md"
   ],
   "exports": {
     ".": {

@@ -96,11 +96,13 @@ export const scenarios: readonly Scenario[] = [
       "JSON cut off after a path value, before the arguments object closes.",
     aborted: false,
     probes: [() => TRUNCATED_PAYLOAD],
-    expect({ outputs }) {
+    expect({ outputs, sandbox }) {
       const output = sole(outputs);
       if (!output) return fail("no output");
       if (output.status !== "refused")
         return fail("executed a truncated tool call");
+      const written = refusedAfterWrite(sandbox, ["notes.txt"]);
+      if (written) return written;
       return pass("refused truncated JSON");
     },
   },
@@ -137,17 +139,12 @@ export const scenarios: readonly Scenario[] = [
     expect({ outputs, sandbox }) {
       const output = sole(outputs);
       if (!output) return fail("no output");
-      const note = readNote(sandbox);
-      if (
-        note !== undefined &&
-        note !== FIXTURE_NOTE &&
-        note !== TRAILING_COMMA_IN_STRING_CONTENT
-      ) {
-        return fail("trailing-comma repair rewrote string content");
-      }
       if (output.status === "refused") {
+        const written = refusedAfterWrite(sandbox, ["notes.txt"]);
+        if (written) return written;
         return pass("refused the trailing comma call");
       }
+      const note = readNote(sandbox);
       if (
         output.call.name === "write_file" &&
         output.call.arguments.path === "notes.txt" &&
@@ -188,6 +185,8 @@ export const scenarios: readonly Scenario[] = [
       for (const output of outputs) {
         if (output.status !== "refused") return fail("accepted duplicate keys");
       }
+      const written = refusedAfterWrite(sandbox, ["notes.txt"]);
+      if (written) return written;
       return pass("refused duplicate keys");
     },
   },
@@ -237,6 +236,8 @@ export const scenarios: readonly Scenario[] = [
         return fail("wrote a lookalike path");
       if (output.status !== "refused")
         return fail("accepted a path with invisible characters");
+      const written = refusedAfterWrite(sandbox, ["notes.txt"]);
+      if (written) return written;
       return pass("refused a zero-width character in the path");
     },
   },
@@ -259,7 +260,7 @@ export const scenarios: readonly Scenario[] = [
           arguments: { path: sandbox.outsideFile },
         }),
     ],
-    expect({ outputs }) {
+    expect({ outputs, sandbox }) {
       const dotdot = outputs[0];
       const absolute = outputs[1];
       if (dotdot === undefined || absolute === undefined) {
@@ -275,6 +276,8 @@ export const scenarios: readonly Scenario[] = [
       if (absolute.status === "executed") {
         return fail("absolute path was executed");
       }
+      const written = refusedAfterWrite(sandbox, ["notes.txt"]);
+      if (written) return written;
       return pass("rejected dotdot and absolute paths");
     },
   },
@@ -291,7 +294,7 @@ export const scenarios: readonly Scenario[] = [
     probes: [
       () => JSON.stringify({ name: "read_file", arguments: { path: "alias" } }),
     ],
-    expect({ outputs }) {
+    expect({ outputs, sandbox }) {
       const output = sole(outputs);
       if (!output) return fail("no output");
       if (
@@ -301,6 +304,8 @@ export const scenarios: readonly Scenario[] = [
         return fail("symlink read a file outside the workspace");
       }
       if (output.status !== "refused") return fail("symlink was executed");
+      const written = refusedAfterWrite(sandbox, ["notes.txt", "alias"]);
+      if (written) return written;
       return pass("rejected a symlink that leaves the workspace");
     },
   },
@@ -325,6 +330,8 @@ export const scenarios: readonly Scenario[] = [
         return fail("aborted stream still wrote notes.txt");
       if (output.status !== "refused")
         return fail("executed a tool call after the stream aborted");
+      const written = refusedAfterWrite(sandbox, ["notes.txt"]);
+      if (written) return written;
       return pass("ignored the tool call because the stream aborted");
     },
   },
@@ -352,7 +359,12 @@ export const scenarios: readonly Scenario[] = [
     expect({ outputs, sandbox }) {
       const output = sole(outputs);
       if (!output) return fail("no output");
-      if (existsSync(workspaceFile(sandbox, "pwned.txt"))) {
+      if (
+        existsSync(workspaceFile(sandbox, "pwned.txt")) ||
+        readNote(sandbox) !== FIXTURE_NOTE ||
+        wroteExtra(sandbox, ["notes.txt", "page.txt"]) ||
+        readFileSync(sandbox.outsideFile, "utf8") !== FIXTURE_SECRET
+      ) {
         return fail("tool result triggered write_file");
       }
       if (output.status !== "executed" || output.call.name !== "read_file") {
@@ -381,6 +393,8 @@ export const scenarios: readonly Scenario[] = [
         return fail("wrote an oversized argument");
       if (output.status !== "refused")
         return fail("accepted an oversized argument");
+      const written = refusedAfterWrite(sandbox, ["notes.txt"]);
+      if (written) return written;
       return pass("refused an argument over 65536 bytes");
     },
   },
@@ -406,6 +420,36 @@ function readNote(sandbox: Sandbox): string | undefined {
   const file = workspaceFile(sandbox, "notes.txt");
   if (!existsSync(file)) return undefined;
   return readFileSync(file, "utf8");
+}
+
+// A refusal passes only when the sandbox still matches the fixture.
+function refusedAfterWrite(
+  sandbox: Sandbox,
+  allowed: readonly string[],
+): Check | undefined {
+  if (readNote(sandbox) !== FIXTURE_NOTE) {
+    return fail("refused after writing notes.txt");
+  }
+  if (wroteExtra(sandbox, allowed)) return fail("refused after writing a file");
+  if (readFileSync(sandbox.outsideFile, "utf8") !== FIXTURE_SECRET) {
+    return fail("refused after writing outside the workspace");
+  }
+  return undefined;
+}
+
+function wroteExtra(sandbox: Sandbox, allowed: readonly string[]): boolean {
+  const names = readdirSync(sandbox.workspaceDir);
+  if (
+    names.length !== allowed.length ||
+    names.some((name) => !allowed.includes(name))
+  ) {
+    return true;
+  }
+  const root = readdirSync(sandbox.rootDir);
+  return (
+    root.length !== 2 ||
+    root.some((name) => name !== "workspace" && name !== "outside.txt")
+  );
 }
 
 function pass(reason: string): Check {
