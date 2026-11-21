@@ -2,7 +2,7 @@
 
 ## 0.1.0
 
-Checks for the code that turns model output into a tool call.
+Checks for the code that turns model output into a tool call. The npm package is `@mrnirmata/gauntlet`.
 
 Scenarios:
 

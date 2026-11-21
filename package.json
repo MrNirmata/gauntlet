@@ -1,5 +1,5 @@
 {
-  "name": "gauntlet",
+  "name": "@mrnirmata/gauntlet",
   "version": "0.1.0",
   "description": "Adversarial checks for the code that turns model output into a tool call.",
   "keywords": [
@@ -32,6 +32,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/MrNirmata/gauntlet.git"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
