@@ -4,6 +4,7 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { execAdapter, httpAdapter } from "./adapters/blackbox.ts";
 import { adapters } from "./adapters/index.ts";
 import { formatJson, formatList, formatRun } from "./format.ts";
 import { runAll } from "./run.ts";
@@ -11,12 +12,21 @@ import { scenarios } from "./scenarios.ts";
 import type { Adapter, Scenario } from "./types.ts";
 
 const USAGE =
-  "usage: gauntlet list | gauntlet run --adapter <name-or-path> [--scenario <id>] [--json]\n";
+  "usage: gauntlet list | gauntlet run (--adapter <name-or-path> | --exec <command> | --http <url>) [--name <label>] [--timeout <ms>] [--scenario <id>] [--json]\n";
+
+const DEFAULT_TIMEOUT_MS = 10_000;
+
+type RunMode =
+  | { kind: "adapter"; spec: string }
+  | { kind: "exec"; command: string }
+  | { kind: "http"; url: string };
 
 type RunFlags = {
-  adapter: string;
+  mode: RunMode;
   scenario: string | undefined;
   json: boolean;
+  timeoutMs: number;
+  name: string | undefined;
 };
 
 export async function runCli(
@@ -38,7 +48,7 @@ export async function runCli(
     stderr.write(`${flags.error}\n`);
     return 2;
   }
-  const adapter = await resolveAdapter(flags.adapter, stderr);
+  const adapter = await resolveRunAdapter(flags, stderr);
   if (!adapter) return 2;
   const selected = selectScenarios(flags.scenario);
   if ("error" in selected) {
@@ -73,6 +83,10 @@ function gauntletVersion(): string {
 
 function parseRunFlags(argv: readonly string[]): RunFlags | { error: string } {
   let adapter: string | undefined;
+  let exec: string | undefined;
+  let http: string | undefined;
+  let timeoutMs = DEFAULT_TIMEOUT_MS;
+  let name: string | undefined;
   let scenario: string | undefined;
   let json = false;
   for (let index = 0; index < argv.length; index += 1) {
@@ -82,20 +96,93 @@ function parseRunFlags(argv: readonly string[]): RunFlags | { error: string } {
       json = true;
       continue;
     }
-    if (token === "--adapter" || token === "--scenario") {
+    if (
+      token === "--adapter" ||
+      token === "--exec" ||
+      token === "--http" ||
+      token === "--timeout" ||
+      token === "--name" ||
+      token === "--scenario"
+    ) {
       const value = argv[index + 1];
       if (value === undefined || value.startsWith("--")) {
         return { error: `missing ${token} value` };
       }
-      if (token === "--adapter") adapter = value;
+      if (token === "--timeout") {
+        if (!/^[1-9]\d*$/.test(value)) return { error: "invalid --timeout" };
+        timeoutMs = Number(value);
+      } else if (token === "--name") {
+        if (value.length === 0) return { error: "missing --name value" };
+        name = value;
+      } else if (token === "--adapter") adapter = value;
+      else if (token === "--exec") exec = value;
+      else if (token === "--http") http = value;
       else scenario = value;
       index += 1;
       continue;
     }
     return { error: `unknown argument ${token}` };
   }
-  if (adapter === undefined) return { error: "missing --adapter" };
-  return { adapter, scenario, json };
+  const selected = [adapter, exec, http].filter(
+    (item) => item !== undefined,
+  ).length;
+  if (selected === 0) {
+    return { error: "missing --adapter, --exec, or --http" };
+  }
+  if (selected > 1) {
+    return { error: "--adapter, --exec, and --http are mutually exclusive" };
+  }
+  if (exec !== undefined) {
+    return {
+      mode: { kind: "exec", command: exec },
+      scenario,
+      json,
+      timeoutMs,
+      name,
+    };
+  }
+  if (http !== undefined) {
+    return {
+      mode: { kind: "http", url: http },
+      scenario,
+      json,
+      timeoutMs,
+      name,
+    };
+  }
+  if (adapter === undefined) {
+    return { error: "missing --adapter, --exec, or --http" };
+  }
+  return {
+    mode: { kind: "adapter", spec: adapter },
+    scenario,
+    json,
+    timeoutMs,
+    name,
+  };
+}
+
+async function resolveRunAdapter(
+  flags: RunFlags,
+  stderr: NodeJS.WritableStream,
+): Promise<Adapter | undefined> {
+  if (flags.mode.kind === "exec") {
+    return execAdapter(
+      flags.mode.command,
+      flags.timeoutMs,
+      flags.name ?? `exec:${flags.mode.command}`,
+    );
+  }
+  if (flags.mode.kind === "http") {
+    return httpAdapter(
+      flags.mode.url,
+      flags.timeoutMs,
+      flags.name ?? `http:${flags.mode.url}`,
+    );
+  }
+  const adapter = await resolveAdapter(flags.mode.spec, stderr);
+  if (!adapter || flags.name === undefined) return adapter;
+  return { name: flags.name, run: (input) => adapter.run(input) };
 }
 
 async function resolveAdapter(

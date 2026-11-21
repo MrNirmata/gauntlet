@@ -33,6 +33,30 @@ The module's default export, or a named export `adapter`, must be an object with
 
 Node loads a `.ts` adapter when it can strip types: Node 22.6 with `--experimental-strip-types`, or a Node 22 that strips types by default. If Node cannot load the TypeScript file, compile it to `.js` or run Gauntlet through `tsx`.
 
+## Black-box mode
+
+`--exec` and `--http` test a program that is not a JavaScript adapter. Python, Rust, and Go fit here. `--adapter`, `--exec`, and `--http` are mutually exclusive, and one of them is required.
+
+`--exec "<command>"` runs the command in a shell for each probe. The working directory is that scenario's sandbox. A relative path in the command is resolved from the directory where you started gauntlet. Gauntlet writes one JSON line to stdin and closes it:
+
+```
+{"raw": "<model output>", "sandboxDir": "/tmp/gauntlet-…/workspace", "aborted": false}
+```
+
+The command prints one JSON object: `executed`, `refused`, or `not-covered`. The program performs the tool call. Scenarios check the sandbox files.
+
+`--http <url>` POSTs the same JSON and reads the same object back. The timeout is 10 seconds. `--timeout <ms>` changes it. A timeout, a non-zero exit, or output that is not that object is an error for that scenario.
+
+`--name <label>` sets the adapter name in the report. The default is `exec:<command>` or `http:<url>`.
+
+`examples/python-adapter.py` is a naive JSON parser using only the Python standard library.
+
+```
+gauntlet run --exec "python3 examples/python-adapter.py"
+```
+
+From a checkout, the same run is `node dist/cli.js run --exec "python3 examples/python-adapter.py"`.
+
 ## Naive run
 
 `node dist/cli.js run --adapter reference-naive`

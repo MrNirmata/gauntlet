@@ -67,6 +67,14 @@ Three adapters are intentionally not in v0.1. Open an issue before starting one.
 - An OpenAI or Anthropic function-call JSON layer.
 - An MCP filesystem server.
 
+## Black-box mode
+
+A program that is not a JavaScript module can use `--exec` or `--http`. Each probe is one JSON object with `raw`, `sandboxDir`, and `aborted`. The reply is one `RunOutput` object. The program performs the tool call in the sandbox. `examples/python-adapter.py` is a standard-library example.
+
+```
+gauntlet run --exec "python3 examples/python-adapter.py"
+```
+
 ## Sandbox
 
-The runner creates the temp directory. The adapter may only touch `sandboxDir`.
+The runner creates the temp directory. The adapter may only touch `sandboxDir`. The `--exec` shell starts in that same directory.
