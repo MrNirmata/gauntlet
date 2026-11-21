@@ -31,18 +31,19 @@ export function formatRun(
 
 export function formatJson(
   adapterName: string,
+  version: string,
   results: readonly Result[],
 ): string {
   const report = {
     adapter: adapterName,
-    results: results.map((result) => ({
+    gauntletVersion: version,
+    scenarios: results.map((result) => ({
       id: result.id,
-      title: result.title,
       category: result.category,
       status: result.status,
       reason: result.reason,
     })),
-    summary: count(results),
+    totals: count(results),
   };
   return `${JSON.stringify(report, null, 2)}\n`;
 }

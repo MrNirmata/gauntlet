@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
@@ -50,10 +51,24 @@ export async function runCli(
   const results = await runAll(adapter, selected.scenarios);
   stdout.write(
     flags.json
-      ? formatJson(adapter.name, results)
+      ? formatJson(adapter.name, gauntletVersion(), results)
       : formatRun(adapter.name, results),
   );
   return results.every((result) => result.status === "pass") ? 0 : 1;
+}
+
+function gauntletVersion(): string {
+  const raw = readFileSync(new URL("../package.json", import.meta.url), "utf8");
+  const parsed: unknown = JSON.parse(raw);
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("version" in parsed) ||
+    typeof parsed.version !== "string"
+  ) {
+    throw new Error("package.json missing version");
+  }
+  return parsed.version;
 }
 
 function parseRunFlags(argv: readonly string[]): RunFlags | { error: string } {
