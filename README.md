@@ -11,8 +11,8 @@ Gauntlet requires Node 22.
 ```
 pnpm install
 pnpm build
-pnpm exec gauntlet list
-pnpm exec gauntlet run --adapter reference-naive
+node dist/cli.js list
+node dist/cli.js run --adapter reference-naive
 ```
 
 `reference-hardened` runs the same scenarios with the checks turned on.
@@ -23,7 +23,7 @@ The exit code stays 0 when every scenario passes or is not covered. A not-covere
 
 ## Naive run
 
-`pnpm exec gauntlet run --adapter reference-naive`
+`node dist/cli.js run --adapter reference-naive`
 
 ```
 adapter: reference-naive

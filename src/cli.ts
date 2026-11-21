@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 
-import { readFileSync } from "node:fs";
-import path from "node:path";
+import { readFileSync, realpathSync } from "node:fs";
 import process from "node:process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { adapters } from "./adapters/index.ts";
 import { formatJson, formatList, formatRun } from "./format.ts";
 import { runAll } from "./run.ts";
@@ -113,7 +112,11 @@ function selectScenarios(
 function isDirectRun(): boolean {
   const entry = process.argv[1];
   if (entry === undefined || entry.length === 0) return false;
-  return import.meta.url === pathToFileURL(path.resolve(entry)).href;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
 }
 
 if (isDirectRun()) {
