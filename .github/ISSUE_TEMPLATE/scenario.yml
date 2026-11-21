@@ -1,0 +1,47 @@
+name: Scenario proposal
+description: Propose an adversarial tool-call case
+body:
+  - type: markdown
+    attributes:
+      value: Describe one failure at the point where model output becomes a tool call.
+  - type: input
+    id: id
+    attributes:
+      label: Proposed id
+      description: Short kebab-case id, for example path-nul-byte.
+      placeholder: path-nul-byte
+    validations:
+      required: true
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - whitespace
+        - json
+        - unicode
+        - path
+        - stream
+        - injection
+        - size
+    validations:
+      required: true
+  - type: textarea
+    id: payload
+    attributes:
+      label: Raw payload
+      description: The model output or tool-call bytes the adapter should receive.
+  - type: textarea
+    id: expect
+    attributes:
+      label: Expected behavior
+      description: What a correct adapter should do, including any file it should or should not write.
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: Failure source
+      description: The project and issue, or a short description of where you saw the failure.
+    validations:
+      required: true
