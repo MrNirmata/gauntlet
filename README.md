@@ -72,6 +72,33 @@ A regression is `pass` or `not-covered` in the file and `fail` or `error` now. `
 
 `--baseline` and `--update-baseline` are mutually exclusive. A missing or invalid baseline file exits 2.
 
+## GitHub Action
+
+The action in this repo builds Gauntlet from its own checkout, then runs it in your workspace. It does not install an npm package. The step exits with Gauntlet's code. A regression fails the job.
+
+The job summary gets a Markdown table of the results. When the run used a baseline, the summary adds regressions, improvements, and new scenarios. Outputs are `pass`, `fail`, `error`, `not-covered`, and `regressions`.
+
+`uses: MrNirmata/gauntlet@main` tracks this branch until v0.2.0 is released. Pin a tag after that, for example `MrNirmata/gauntlet@v0.2.0`.
+
+```yaml
+name: gauntlet
+
+on:
+  pull_request:
+
+jobs:
+  gauntlet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: MrNirmata/gauntlet@main
+        with:
+          exec: python3 adapter.py
+          baseline: gauntlet-baseline.json
+```
+
+Set exactly one of `adapter`, `exec`, or `http`. `name`, `timeout`, `scenario`, `strict`, and `working-directory` are optional. `strict: true` counts a new failure as a regression. `working-directory` defaults to `.` and is relative to the job workspace. `baseline` is a path inside that directory.
+
 ## Naive run
 
 `node dist/cli.js run --adapter reference-naive`
