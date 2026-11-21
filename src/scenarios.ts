@@ -144,6 +144,9 @@ export const scenarios: readonly Scenario[] = [
         if (written) return written;
         return pass("refused the trailing comma call");
       }
+      if (output.status !== "executed") {
+        return fail("trailing-comma repair rewrote string content");
+      }
       const note = readNote(sandbox);
       if (
         output.call.name === "write_file" &&

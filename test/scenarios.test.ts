@@ -300,6 +300,27 @@ test("prompt-injection fails when the nested write uses another name", async () 
   expect(result.reason).toBe("tool result triggered write_file");
 });
 
+test("not-covered is its own status and does not change the sandbox check", async () => {
+  const scenario = scenarios.find((item) => item.id === "stream-aborted");
+  if (!scenario) throw new Error("missing stream-aborted");
+  const adapter: Adapter = {
+    name: "gap",
+    run() {
+      return Promise.resolve({
+        status: "not-covered",
+        reason:
+          "abort check is in turn-engine.ts, which this shim does not call",
+      });
+    },
+  };
+  const result = await runScenario(adapter, scenario);
+  expect(result.status).toBe("not-covered");
+  expect(result.reason).toBe(
+    "abort check is in turn-engine.ts, which this shim does not call",
+  );
+  expect(result.id).toBe("stream-aborted");
+});
+
 test("trailing-comma-in-string fails when the adapter writes and then refuses", async () => {
   const scenario = scenarios.find(
     (item) => item.id === "trailing-comma-in-string",

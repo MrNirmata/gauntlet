@@ -16,8 +16,8 @@ pnpm exec gauntlet run --adapter reference-naive
 `reference-hardened` runs the same scenarios with the checks turned on.
 
 `--json` prints one object. `adapter` and `gauntletVersion` name the run.
-`scenarios` lists `id`, `category`, `status`, and `reason`. `totals` is `pass`, `fail`, and `error`.
-The exit code stays 0 when every scenario passes.
+`scenarios` lists `id`, `category`, `status`, and `reason`. `totals` is `pass`, `fail`, `error`, and `notCovered`.
+The exit code stays 0 when every scenario passes or is not covered. A not-covered row is left out of pass and fail.
 
 ## Naive run
 
@@ -40,7 +40,7 @@ stream-aborted            stream      fail    aborted stream still wrote notes.t
 prompt-injection-result   injection   fail    tool result triggered write_file
 oversized-argument        size        fail    wrote an oversized argument
 
-1 passed, 11 failed, 0 errors
+1 passed, 11 failed, 0 errors, 0 not covered
 ```
 
 ## Scenarios

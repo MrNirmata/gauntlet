@@ -4,6 +4,7 @@ import path from "node:path";
 import { Writable } from "node:stream";
 import { expect, test } from "vitest";
 import { runCli } from "../src/cli.ts";
+import { formatJson, formatRun } from "../src/format.ts";
 import { scenarios } from "../src/scenarios.ts";
 
 test("list prints every scenario id", async () => {
@@ -33,7 +34,12 @@ test("hardened json run passes", async () => {
   expect(report.scenarios.map((scenario) => scenario.id)).toEqual(
     scenarios.map((scenario) => scenario.id),
   );
-  expect(report.totals).toEqual({ pass: scenarios.length, fail: 0, error: 0 });
+  expect(report.totals).toEqual({
+    pass: scenarios.length,
+    fail: 0,
+    error: 0,
+    notCovered: 0,
+  });
   expect(stderr.text()).toBe("");
 });
 
@@ -57,7 +63,32 @@ test("naive truncated-json run fails", async () => {
   expect(report.scenarios).toHaveLength(1);
   expect(report.scenarios[0]?.status).toBe("fail");
   expect(report.scenarios[0]?.id).toBe("truncated-json");
-  expect(report.totals).toEqual({ pass: 0, fail: 1, error: 0 });
+  expect(report.totals).toEqual({ pass: 0, fail: 1, error: 0, notCovered: 0 });
+});
+
+test("not-covered is counted apart from pass and fail", () => {
+  const results = [
+    {
+      id: "stream-aborted",
+      title: "Stream aborted mid tool call",
+      category: "stream" as const,
+      status: "not-covered" as const,
+      reason: "abort check is in turn-engine.ts, which this shim does not call",
+    },
+    {
+      id: "truncated-json",
+      title: "Truncated JSON arguments",
+      category: "json" as const,
+      status: "pass" as const,
+      reason: "refused truncated JSON",
+    },
+  ];
+  const text = formatRun("nanocoder", results);
+  expect(text).toContain("not-covered");
+  expect(text).toContain("1 passed, 0 failed, 0 errors, 1 not covered");
+  const report = readReport(formatJson("nanocoder", "0.1.0", results));
+  expect(report.totals).toEqual({ pass: 1, fail: 0, error: 0, notCovered: 1 });
+  expect(report.scenarios[0]?.status).toBe("not-covered");
 });
 
 test("unknown adapter exits 2", async () => {
@@ -101,7 +132,7 @@ function readReport(text: string): {
   adapter: string;
   gauntletVersion: string;
   scenarios: { id: string; category: string; status: string; reason: string }[];
-  totals: { pass: number; fail: number; error: number };
+  totals: { pass: number; fail: number; error: number; notCovered: number };
 } {
   const value: unknown = JSON.parse(text);
   if (typeof value !== "object" || value === null)
@@ -131,14 +162,20 @@ function readReport(text: string): {
   if (typeof totals !== "object" || totals === null || !Array.isArray(rows)) {
     throw new Error("report had the wrong shape");
   }
-  if (!("pass" in totals) || !("fail" in totals) || !("error" in totals)) {
+  if (
+    !("pass" in totals) ||
+    !("fail" in totals) ||
+    !("error" in totals) ||
+    !("notCovered" in totals)
+  ) {
     throw new Error("totals missing counts");
   }
-  const { pass, fail, error } = totals;
+  const { pass, fail, error, notCovered } = totals;
   if (
     typeof pass !== "number" ||
     typeof fail !== "number" ||
-    typeof error !== "number"
+    typeof error !== "number" ||
+    typeof notCovered !== "number"
   ) {
     throw new Error("totals counts were not numbers");
   }
@@ -184,7 +221,7 @@ function readReport(text: string): {
     adapter,
     gauntletVersion,
     scenarios,
-    totals: { pass, fail, error },
+    totals: { pass, fail, error, notCovered },
   };
 }
 

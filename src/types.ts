@@ -14,7 +14,8 @@ export type ToolCall = {
 
 export type RunOutput =
   | { status: "executed"; call: ToolCall; result: string }
-  | { status: "refused"; reason: string };
+  | { status: "refused"; reason: string }
+  | { status: "not-covered"; reason: string };
 
 export type AdapterRunInput = {
   raw: string;
@@ -50,6 +51,6 @@ export type Result = {
   id: string;
   title: string;
   category: Category;
-  status: "pass" | "fail" | "error";
+  status: "pass" | "fail" | "error" | "not-covered";
   reason: string;
 };

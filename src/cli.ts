@@ -54,7 +54,10 @@ export async function runCli(
       ? formatJson(adapter.name, gauntletVersion(), results)
       : formatRun(adapter.name, results),
   );
-  return results.every((result) => result.status === "pass") ? 0 : 1;
+  const bad = results.some(
+    (result) => result.status === "fail" || result.status === "error",
+  );
+  return bad ? 1 : 0;
 }
 
 function gauntletVersion(): string {

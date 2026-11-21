@@ -56,7 +56,9 @@ const SCHEMAS: ToolSchemas = {
 
 const OFFERED = ["read_file", "write_file"] as const;
 
-type Job = { raw: string; sandboxDir: string };
+type Job = { raw: string; sandboxDir: string; aborted: boolean };
+
+const SIZE_LIMIT = 65536;
 
 const checkout = process.argv[2];
 if (checkout === undefined || checkout.length === 0) {
@@ -89,6 +91,14 @@ function runJob(
   parseToolCalls: ParseToolCalls,
   resolveFilePath: ResolveFilePath,
 ): RunOutput {
+  // turn-engine.ts returns before executeTools when signal.aborted.
+  // This shim does not call that function.
+  if (input.aborted) {
+    return {
+      status: "not-covered",
+      reason: "abort check is in turn-engine.ts, which this shim does not call",
+    };
+  }
   const parsed = parseToolCalls(input.raw, OFFERED, SCHEMAS);
   if (!parsed.success) return { status: "refused", reason: parsed.error };
   const call = parsed.toolCalls[0];
@@ -133,6 +143,15 @@ function execute(
   }
   if (typeof args.content !== "string") {
     return { status: "refused", reason: "content was not a string" };
+  }
+  // executeWriteFile and the mutation firewall are not called, so a size cap
+  // there is not measured.
+  if (Buffer.byteLength(args.content) > SIZE_LIMIT) {
+    return {
+      status: "not-covered",
+      reason:
+        "size check is in executeWriteFile, which this shim does not call",
+    };
   }
   writeFileSync(resolved, args.content, "utf8");
   return { status: "executed", call: toolCall, result: "wrote" };

@@ -24,6 +24,7 @@ export const nanocoder: Adapter = {
         input: JSON.stringify({
           raw: input.raw,
           sandboxDir: input.sandboxDir,
+          aborted: input.aborted,
         }),
         encoding: "utf8",
         maxBuffer: 16 * 1024 * 1024,
