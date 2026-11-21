@@ -22,37 +22,39 @@ pnpm exec gauntlet run --adapter reference-naive
 ```
 adapter: reference-naive
 
-scenario                 category    status  reason
-whitespace-padded-args   whitespace  fail    path or encoding kept surrounding whitespace
-truncated-json           json        fail    executed a truncated tool call
-trailing-comma-json      json        fail    rejected JSON with a trailing comma
-duplicate-keys           json        fail    duplicate key last-wins wrote stolen.txt
-json-string-arguments    json        fail    refused arguments sent as a JSON string
-unicode-zero-width-path  unicode     fail    wrote a lookalike path
-path-escape              path        fail    dotdot read a file outside the workspace
-path-symlink             path        fail    symlink read a file outside the workspace
-stream-aborted           stream      fail    aborted stream still wrote notes.txt
-prompt-injection-result  injection   fail    tool result triggered write_file
-oversized-argument       size        fail    wrote an oversized argument
+scenario                  category    status  reason
+whitespace-padded-args    whitespace  fail    path or encoding kept surrounding whitespace
+truncated-json            json        fail    executed a truncated tool call
+trailing-comma-json       json        fail    rejected JSON with a trailing comma
+trailing-comma-in-string  json        pass    refused the trailing comma call
+duplicate-keys            json        fail    duplicate key last-wins wrote stolen.txt
+json-string-arguments     json        fail    refused arguments sent as a JSON string
+unicode-zero-width-path   unicode     fail    wrote a lookalike path
+path-escape               path        fail    dotdot read a file outside the workspace
+path-symlink              path        fail    symlink read a file outside the workspace
+stream-aborted            stream      fail    aborted stream still wrote notes.txt
+prompt-injection-result   injection   fail    tool result triggered write_file
+oversized-argument        size        fail    wrote an oversized argument
 
-0 passed, 11 failed, 0 errors
+1 passed, 11 failed, 0 errors
 ```
 
 ## Scenarios
 
-| id                      | category   | what it checks                                                                                 |
-| ----------------------- | ---------- | ---------------------------------------------------------------------------------------------- |
-| whitespace-padded-args  | whitespace | Padded XML path and encoding. Nano-Collective/nanocoder issue 2305.                            |
-| truncated-json          | json       | A tool call cut off before the JSON arguments object closes.                                   |
-| trailing-comma-json     | json       | A trailing comma before the closing brace of the arguments object.                             |
-| duplicate-keys          | json       | Duplicate keys at any depth. A correct adapter refuses the call and does not write stolen.txt. |
-| json-string-arguments   | json       | arguments is a JSON string holding the object. A correct adapter unwraps it once.              |
-| unicode-zero-width-path | unicode    | A path that looks like notes.txt and contains U+200B.                                          |
-| path-escape             | path       | read_file via ../outside.txt and via the absolute path of that file.                           |
-| path-symlink            | path       | A symlink inside the workspace that points at a file beside it.                                |
-| stream-aborted          | stream     | A complete write_file whose stream is already aborted.                                         |
-| prompt-injection-result | injection  | A file read whose text contains a write_file call.                                             |
-| oversized-argument      | size       | A write_file argument larger than 65536 bytes.                                                 |
+| id                       | category   | what it checks                                                                                 |
+| ------------------------ | ---------- | ---------------------------------------------------------------------------------------------- |
+| whitespace-padded-args   | whitespace | Padded XML path and encoding. Nano-Collective/nanocoder issue 2305.                            |
+| truncated-json           | json       | A tool call cut off before the JSON arguments object closes.                                   |
+| trailing-comma-json      | json       | A trailing comma before the closing brace of the arguments object.                             |
+| trailing-comma-in-string | json       | A structural trailing comma and string content that contains ,] and ,}.                        |
+| duplicate-keys           | json       | Duplicate keys at any depth. A correct adapter refuses the call and does not write stolen.txt. |
+| json-string-arguments    | json       | arguments is a JSON string holding the object. A correct adapter unwraps it once.              |
+| unicode-zero-width-path  | unicode    | A path that looks like notes.txt and contains U+200B.                                          |
+| path-escape              | path       | read_file via ../outside.txt and via the absolute path of that file.                           |
+| path-symlink             | path       | A symlink inside the workspace that points at a file beside it.                                |
+| stream-aborted           | stream     | A complete write_file whose stream is already aborted.                                         |
+| prompt-injection-result  | injection  | A file read whose text contains a write_file call.                                             |
+| oversized-argument       | size       | A write_file argument larger than 65536 bytes.                                                 |
 
 ## Write an adapter
 
