@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add a GitHub Action that builds Gauntlet from the checkout and writes the run to the job summary.
 - Compare a run with `--baseline` and record the current results with `--update-baseline`.
 - Run a program that is not a JavaScript adapter with `--exec <command>` or `--http <url>`.
 - Load a user adapter from a file with `gauntlet run --adapter <path>`.

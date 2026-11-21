@@ -1,0 +1,86 @@
+name: Gauntlet
+description: Run adversarial tool-call checks. The step fails when Gauntlet exits non-zero.
+author: MrNirmata
+
+inputs:
+  adapter:
+    description: Built-in adapter name or a path to an adapter module. Set exactly one of adapter, exec, or http.
+    required: false
+  exec:
+    description: Shell command for a black-box adapter. Set exactly one of adapter, exec, or http.
+    required: false
+  http:
+    description: URL of an HTTP adapter. Set exactly one of adapter, exec, or http.
+    required: false
+  name:
+    description: Adapter name recorded in the report.
+    required: false
+  timeout:
+    description: Per-probe timeout in milliseconds.
+    required: false
+  baseline:
+    description: Baseline file to compare against. A regression fails the step.
+    required: false
+  strict:
+    description: When true, a new scenario that fails or errors counts as a regression.
+    required: false
+    default: "false"
+  scenario:
+    description: Run one scenario id instead of the full suite.
+    required: false
+  working-directory:
+    description: Directory to run Gauntlet in. A relative path starts at the job workspace.
+    required: false
+    default: "."
+
+outputs:
+  pass:
+    description: Scenarios that passed.
+    value: ${{ steps.gauntlet.outputs.pass }}
+  fail:
+    description: Scenarios that failed.
+    value: ${{ steps.gauntlet.outputs.fail }}
+  error:
+    description: Scenarios that errored.
+    value: ${{ steps.gauntlet.outputs.error }}
+  not-covered:
+    description: Scenarios that were not covered.
+    value: ${{ steps.gauntlet.outputs.not-covered }}
+  regressions:
+    description: Comma-separated scenario ids that regressed.
+    value: ${{ steps.gauntlet.outputs.regressions }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - name: Build Gauntlet
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        NODE_ENV: development
+      run: |
+        corepack enable
+        corepack install
+        pnpm install --frozen-lockfile
+        pnpm build
+
+    - name: Run Gauntlet
+      id: gauntlet
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INPUT_ADAPTER: ${{ inputs.adapter }}
+        INPUT_EXEC: ${{ inputs.exec }}
+        INPUT_HTTP: ${{ inputs.http }}
+        INPUT_NAME: ${{ inputs.name }}
+        INPUT_TIMEOUT: ${{ inputs.timeout }}
+        INPUT_BASELINE: ${{ inputs.baseline }}
+        INPUT_STRICT: ${{ inputs.strict }}
+        INPUT_SCENARIO: ${{ inputs.scenario }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action-run.sh"
