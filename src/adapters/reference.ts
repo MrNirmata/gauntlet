@@ -143,7 +143,7 @@ function parseXml(raw: string): Parsed {
 }
 
 function parseJson(raw: string, policy: Policy): Parsed {
-  if (policy.rejectDuplicateKeys && duplicateArgumentKey(raw)) {
+  if (policy.rejectDuplicateKeys && duplicateKey(raw)) {
     return { ok: false, reason: "duplicate key" };
   }
   const direct = tryParseCall(raw, policy.unwrapStringArguments);
@@ -220,52 +220,148 @@ function unwrapOnce(args: unknown): unknown {
   }
 }
 
-function duplicateArgumentKey(json: string): boolean {
-  const marker = '"arguments"';
-  const argsAt = json.indexOf(marker);
-  if (argsAt < 0) return false;
-  const valueAt = argsAt + marker.length;
-  const lead = /^\s*:\s*/.exec(json.slice(valueAt))?.[0].length;
-  if (lead !== undefined && json[valueAt + lead] === '"') {
-    // arguments is a JSON string, so check the keys inside it too
-    const inner = readString(json, valueAt + lead);
-    return inner ? duplicateArgumentKey(`{"arguments":${inner.value}}`) : false;
+// Walk every object and compare decoded keys. A repeat at any depth refuses
+// the call before JSON.parse. A JSON-string arguments value is walked too.
+function duplicateKey(json: string): boolean {
+  const scanned = scanValue(json, skipSpace(json, 0));
+  return scanned?.duplicate === true;
+}
+
+type Scan = { next: number; duplicate: boolean };
+type Step = { done: boolean; next: number };
+
+function scanValue(json: string, index: number): Scan | null {
+  const char = json[index];
+  if (char === "{") return scanObject(json, index);
+  if (char === "[") return scanArray(json, index);
+  if (char === '"') {
+    const text = readString(json, index);
+    if (!text) return null;
+    return { next: text.next, duplicate: false };
   }
-  const start = json.indexOf("{", valueAt);
-  if (start < 0) return false;
-  const keys: string[] = [];
-  let depth = 0;
-  let index = start;
+  if (char === "-" || isDigit(char)) return scanNumber(json, index);
+  if (json.startsWith("true", index)) return scanLiteral(json, index, "true");
+  if (json.startsWith("false", index)) return scanLiteral(json, index, "false");
+  if (json.startsWith("null", index)) return scanLiteral(json, index, "null");
+  return null;
+}
+
+function scanObject(json: string, start: number): Scan | null {
+  const keys = new Set<string>();
+  let index = skipSpace(json, start + 1);
+  if (json[index] === "}") return { next: index + 1, duplicate: false };
   while (index < json.length) {
-    const char = json[index];
-    if (char === '"') {
-      const text = readString(json, index);
-      if (!text) return false;
-      let cursor = text.next;
-      while (cursor < json.length && isSpace(json[cursor])) cursor += 1;
-      if (depth === 1 && json[cursor] === ":") keys.push(text.value);
-      index = text.next;
-      continue;
-    }
-    if (char === "{") {
-      depth += 1;
-      index += 1;
-      continue;
-    }
-    if (char === "}") {
-      depth -= 1;
-      if (depth === 0) break;
-      index += 1;
-      continue;
-    }
-    index += 1;
+    if (json[index] !== '"') return null;
+    const key = readString(json, index);
+    if (!key) return null;
+    if (keys.has(key.value)) return { next: key.next, duplicate: true };
+    keys.add(key.value);
+    index = skipSpace(json, key.next);
+    if (json[index] !== ":") return null;
+    index = skipSpace(json, index + 1);
+    const value = scanMember(json, index, key.value);
+    if (!value) return null;
+    if (value.duplicate) return value;
+    const step = afterItem(json, value.next, "}");
+    if (!step) return null;
+    if (step.done) return { next: step.next, duplicate: false };
+    index = step.next;
   }
-  const seen = new Set<string>();
-  for (const key of keys) {
-    if (seen.has(key)) return true;
-    seen.add(key);
+  return null;
+}
+
+function scanArray(json: string, start: number): Scan | null {
+  let index = skipSpace(json, start + 1);
+  if (json[index] === "]") return { next: index + 1, duplicate: false };
+  while (index < json.length) {
+    const value = scanValue(json, index);
+    if (!value) return null;
+    if (value.duplicate) return value;
+    const step = afterItem(json, value.next, "]");
+    if (!step) return null;
+    if (step.done) return { next: step.next, duplicate: false };
+    index = step.next;
   }
-  return false;
+  return null;
+}
+
+// arguments may itself be a JSON string. Walk that text before it is parsed.
+function scanMember(json: string, index: number, key: string): Scan | null {
+  if (key === "arguments" && json[index] === '"') {
+    const text = readString(json, index);
+    if (!text) return null;
+    if (duplicateKey(text.value)) return { next: text.next, duplicate: true };
+    return { next: text.next, duplicate: false };
+  }
+  return scanValue(json, index);
+}
+
+function afterItem(json: string, index: number, close: "}" | "]"): Step | null {
+  const cursor = skipSpace(json, index);
+  if (json[cursor] === ",") {
+    const next = skipSpace(json, cursor + 1);
+    if (json[next] === close) return { done: true, next: next + 1 };
+    return { done: false, next };
+  }
+  if (json[cursor] === close) return { done: true, next: cursor + 1 };
+  return null;
+}
+
+function scanNumber(json: string, index: number): Scan | null {
+  let cursor = index;
+  if (json[cursor] === "-") cursor += 1;
+  const first = json[cursor];
+  if (first === "0") {
+    cursor += 1;
+  } else if (isDigit(first)) {
+    while (isDigit(json[cursor])) cursor += 1;
+  } else {
+    return null;
+  }
+  if (json[cursor] === ".") {
+    cursor += 1;
+    const mark = cursor;
+    while (isDigit(json[cursor])) cursor += 1;
+    if (cursor === mark) return null;
+  }
+  if (json[cursor] === "e" || json[cursor] === "E") {
+    cursor += 1;
+    if (json[cursor] === "+" || json[cursor] === "-") cursor += 1;
+    const mark = cursor;
+    while (isDigit(json[cursor])) cursor += 1;
+    if (cursor === mark) return null;
+  }
+  return { next: cursor, duplicate: false };
+}
+
+function scanLiteral(
+  json: string,
+  index: number,
+  literal: string,
+): Scan | null {
+  if (!json.startsWith(literal, index)) return null;
+  const after = json[index + literal.length];
+  if (after !== undefined && isWord(after)) return null;
+  return { next: index + literal.length, duplicate: false };
+}
+
+function isDigit(char: string | undefined): boolean {
+  return char !== undefined && char >= "0" && char <= "9";
+}
+
+function isWord(char: string): boolean {
+  return (
+    (char >= "a" && char <= "z") ||
+    (char >= "A" && char <= "Z") ||
+    char === "_" ||
+    isDigit(char)
+  );
+}
+
+function skipSpace(json: string, index: number): number {
+  let cursor = index;
+  while (isSpace(json[cursor])) cursor += 1;
+  return cursor;
 }
 
 function toolCallInText(text: string): ToolCall | null {
