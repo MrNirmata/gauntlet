@@ -1,5 +1,6 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import { expect, test } from "vitest";
 import {
   referenceHardened,
@@ -69,4 +70,43 @@ test("a refusal deletes the sandbox", async () => {
   expect(sandboxDir.startsWith(os.tmpdir())).toBe(true);
   expect(existsSync(sandboxDir)).toBe(false);
   expect(existsSync(sandboxDir.replace(/workspace$/, ""))).toBe(false);
+});
+
+async function runHardened(raw: string) {
+  const sandboxDir = mkdtempSync(path.join(os.tmpdir(), "gauntlet-"));
+  try {
+    const output = await referenceHardened.run({
+      raw,
+      sandboxDir,
+      aborted: false,
+    });
+    return { output, stolen: existsSync(path.join(sandboxDir, "stolen.txt")) };
+  } finally {
+    rmSync(sandboxDir, { recursive: true, force: true });
+  }
+}
+
+test("string arguments are unwrapped once, not recursively", async () => {
+  const once = JSON.stringify({ path: "notes.txt" });
+  const twice = JSON.stringify(once);
+  const single = await runHardened(
+    JSON.stringify({ name: "read_file", arguments: once }),
+  );
+  expect(single.output).toMatchObject({
+    status: "executed",
+    call: { arguments: { path: "notes.txt" } },
+  });
+  const triple = await runHardened(
+    JSON.stringify({ name: "read_file", arguments: twice }),
+  );
+  expect(triple.output.status).toBe("refused");
+});
+
+test("duplicate keys inside string arguments are still refused", async () => {
+  const inner = '{"path":"notes.txt","path":"stolen.txt","content":"x"}';
+  const result = await runHardened(
+    JSON.stringify({ name: "write_file", arguments: inner }),
+  );
+  expect(result.output.status).toBe("refused");
+  expect(result.stolen).toBe(false);
 });

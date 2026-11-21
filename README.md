@@ -27,6 +27,7 @@ whitespace-padded-args   whitespace  fail    path or encoding kept surrounding w
 truncated-json           json        fail    executed a truncated tool call
 trailing-comma-json      json        fail    rejected JSON with a trailing comma
 duplicate-keys           json        fail    duplicate key last-wins wrote stolen.txt
+json-string-arguments    json        fail    refused arguments sent as a JSON string
 unicode-zero-width-path  unicode     fail    wrote a lookalike path
 path-escape              path        fail    dotdot read a file outside the workspace
 path-symlink             path        fail    symlink read a file outside the workspace
@@ -34,7 +35,7 @@ stream-aborted           stream      fail    aborted stream still wrote notes.tx
 prompt-injection-result  injection   fail    tool result triggered write_file
 oversized-argument       size        fail    wrote an oversized argument
 
-0 passed, 10 failed, 0 errors
+0 passed, 11 failed, 0 errors
 ```
 
 ## Scenarios
@@ -45,6 +46,7 @@ oversized-argument       size        fail    wrote an oversized argument
 | truncated-json          | json       | A tool call cut off before the JSON arguments object closes.                                   |
 | trailing-comma-json     | json       | A trailing comma before the closing brace of the arguments object.                             |
 | duplicate-keys          | json       | Duplicate path and content keys. A correct adapter refuses them and does not write stolen.txt. |
+| json-string-arguments   | json       | arguments is a JSON string holding the object. A correct adapter unwraps it once.              |
 | unicode-zero-width-path | unicode    | A path that looks like notes.txt and contains U+200B.                                          |
 | path-escape             | path       | read_file via ../outside.txt and via the absolute path of that file.                           |
 | path-symlink            | path       | A symlink inside the workspace that points at a file beside it.                                |
