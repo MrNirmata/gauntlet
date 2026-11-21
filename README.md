@@ -45,7 +45,7 @@ oversized-argument       size        fail    wrote an oversized argument
 | whitespace-padded-args  | whitespace | Padded XML path and encoding. Nano-Collective/nanocoder issue 2305.                            |
 | truncated-json          | json       | A tool call cut off before the JSON arguments object closes.                                   |
 | trailing-comma-json     | json       | A trailing comma before the closing brace of the arguments object.                             |
-| duplicate-keys          | json       | Duplicate path and content keys. A correct adapter refuses them and does not write stolen.txt. |
+| duplicate-keys          | json       | Duplicate keys at any depth. A correct adapter refuses the call and does not write stolen.txt. |
 | json-string-arguments   | json       | arguments is a JSON string holding the object. A correct adapter unwraps it once.              |
 | unicode-zero-width-path | unicode    | A path that looks like notes.txt and contains U+200B.                                          |
 | path-escape             | path       | read_file via ../outside.txt and via the absolute path of that file.                           |

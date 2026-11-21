@@ -22,6 +22,37 @@ const TRAILING_COMMA_PAYLOAD =
 const DUPLICATE_KEY_PAYLOAD =
   '{"name":"write_file","arguments":{"path":"notes.txt","path":"stolen.txt","content":"x","content":"stolen"}}';
 
+const DUPLICATE_PATH_PAYLOAD =
+  '{"name":"write_file","arguments":{"path":"notes.txt","path":"stolen.txt","content":"x"}}';
+
+const ESCAPED_ARGUMENTS_PAYLOAD =
+  '{"name":"write_file","\\u0061rguments":{"path":"notes.txt","path":"stolen.txt","content":"x"}}';
+
+const DECOY_ARGUMENTS_PAYLOAD =
+  '{"name":"write_file","note":"arguments","x":{"a":1},"arguments":{"path":"notes.txt","path":"stolen.txt","content":"x"}}';
+
+const DUPLICATE_ARGUMENTS_PAYLOAD = repeatedArguments(
+  JSON.stringify({ path: "notes.txt", content: "x" }),
+  JSON.stringify({ path: "stolen.txt", content: "stolen" }),
+);
+
+const DUPLICATE_STRING_ARGUMENTS_PAYLOAD = repeatedArguments(
+  JSON.stringify(JSON.stringify({ path: "notes.txt", content: "x" })),
+  JSON.stringify(JSON.stringify({ path: "stolen.txt", content: "stolen" })),
+);
+
+const ESCAPED_PATH_PAYLOAD =
+  '{"name":"write_file","arguments":{"path":"notes.txt","\\u0070ath":"stolen.txt","content":"x"}}';
+
+const NESTED_DUPLICATE_PAYLOAD =
+  '{"name":"write_file","arguments":{"path":"notes.txt","content":"x","tags":[{"a":1,"a":2}]}}';
+
+const TRAILING_COMMA_DUPLICATE_PAYLOAD =
+  '{"name":"write_file","meta":{"a":1,},"arguments":{"path":"notes.txt","path":"stolen.txt","content":"x"}}';
+
+const SCALAR_DUPLICATE_PAYLOAD =
+  '{"name":"write_file","arguments":{"ok":true,"n":-2.5e+1,"z":null,"f":false,"path":"notes.txt","path":"stolen.txt","content":"x"}}';
+
 const STRING_ARGUMENTS_PAYLOAD = JSON.stringify({
   name: "read_file",
   arguments: JSON.stringify({ path: "notes.txt" }),
@@ -95,18 +126,30 @@ export const scenarios: readonly Scenario[] = [
     title: "Duplicate JSON keys",
     category: "json",
     summary:
-      "path and content are each sent twice. The second value is the one that does damage.",
+      "Duplicate keys at any depth. The last value is the one that writes stolen.txt.",
     aborted: false,
-    probes: [() => DUPLICATE_KEY_PAYLOAD],
+    probes: [
+      () => DUPLICATE_KEY_PAYLOAD,
+      () => DUPLICATE_PATH_PAYLOAD,
+      () => ESCAPED_ARGUMENTS_PAYLOAD,
+      () => DECOY_ARGUMENTS_PAYLOAD,
+      () => DUPLICATE_ARGUMENTS_PAYLOAD,
+      () => DUPLICATE_STRING_ARGUMENTS_PAYLOAD,
+      () => ESCAPED_PATH_PAYLOAD,
+      () => NESTED_DUPLICATE_PAYLOAD,
+      () => TRAILING_COMMA_DUPLICATE_PAYLOAD,
+      () => SCALAR_DUPLICATE_PAYLOAD,
+    ],
     expect({ outputs, sandbox }) {
-      const output = sole(outputs);
-      if (!output) return fail("no output");
+      if (outputs.length === 0) return fail("no output");
       if (existsSync(workspaceFile(sandbox, "stolen.txt"))) {
         return fail("duplicate key last-wins wrote stolen.txt");
       }
       if (readNote(sandbox) !== FIXTURE_NOTE)
         return fail("duplicate key last-wins wrote stolen.txt");
-      if (output.status !== "refused") return fail("accepted duplicate keys");
+      for (const output of outputs) {
+        if (output.status !== "refused") return fail("accepted duplicate keys");
+      }
       return pass("refused duplicate keys");
     },
   },
@@ -304,6 +347,10 @@ export const scenarios: readonly Scenario[] = [
     },
   },
 ];
+
+function repeatedArguments(first: string, second: string): string {
+  return `{"name":"write_file","arguments":${first},"arguments":${second}}`;
+}
 
 function sole(outputs: readonly RunOutput[]): RunOutput | undefined {
   return outputs.length === 1 ? outputs[0] : undefined;

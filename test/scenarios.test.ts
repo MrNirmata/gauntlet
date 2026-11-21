@@ -110,3 +110,32 @@ test("duplicate keys inside string arguments are still refused", async () => {
   expect(result.output.status).toBe("refused");
   expect(result.stolen).toBe(false);
 });
+
+test("every duplicate-keys probe is refused and does not write stolen.txt", async () => {
+  const scenario = scenarios.find((item) => item.id === "duplicate-keys");
+  if (!scenario) throw new Error("missing duplicate-keys scenario");
+  for (const probe of scenario.probes) {
+    const raw = probe({
+      rootDir: "",
+      workspaceDir: "",
+      outsideFile: "",
+    });
+    const result = await runHardened(raw);
+    expect(result.output, raw).toEqual({
+      status: "refused",
+      reason: "duplicate key",
+    });
+    expect(result.stolen, raw).toBe(false);
+  }
+});
+
+test("an escaped arguments key with unique keys still executes", async () => {
+  const raw =
+    '{"name":"write_file","\\u0061rguments":{"path":"out.txt","content":"ok"}}';
+  const result = await runHardened(raw);
+  expect(result.output).toMatchObject({
+    status: "executed",
+    call: { name: "write_file", arguments: { path: "out.txt", content: "ok" } },
+  });
+  expect(result.stolen).toBe(false);
+});
