@@ -150,7 +150,7 @@ function parseJson(raw: string, policy: Policy): Parsed {
   if (direct.ok) return direct;
   if (policy.repairTrailingCommas) {
     const repaired = tryParseCall(
-      raw.replace(/,\s*([}\]])/g, "$1"),
+      stripTrailingCommas(raw),
       policy.unwrapStringArguments,
     );
     if (repaired.ok) return repaired;
@@ -160,6 +160,42 @@ function parseJson(raw: string, policy: Policy): Parsed {
     return parseTruncated(raw);
   }
   return { ok: false, reason: "invalid JSON" };
+}
+
+// A comma before } or ] is trailing only outside a string. ",}" inside a
+// value has to stay, or the repair writes different bytes than the model sent.
+function stripTrailingCommas(raw: string): string {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (char === undefined) break;
+    if (inString) {
+      out += char;
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      out += char;
+      continue;
+    }
+    if (char === ",") {
+      const closer = raw[skipSpace(raw, index + 1)];
+      if (closer === "}" || closer === "]") continue;
+    }
+    out += char;
+  }
+  return out;
 }
 
 function parseTruncated(raw: string): Parsed {

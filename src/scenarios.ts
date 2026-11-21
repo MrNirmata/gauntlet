@@ -19,6 +19,11 @@ const TRUNCATED_PAYLOAD = '{"name":"read_file","arguments":{"path":"notes.txt"';
 const TRAILING_COMMA_PAYLOAD =
   '{"name":"read_file","arguments":{"path":"notes.txt",}}';
 
+const TRAILING_COMMA_IN_STRING_CONTENT = "x = [1, 2,] y = {a: 1,}";
+
+const TRAILING_COMMA_IN_STRING_PAYLOAD =
+  '{"name":"write_file","arguments":{"path":"notes.txt","content":"x = [1, 2,] y = {a: 1,}",}}';
+
 const DUPLICATE_KEY_PAYLOAD =
   '{"name":"write_file","arguments":{"path":"notes.txt","path":"stolen.txt","content":"x","content":"stolen"}}';
 
@@ -119,6 +124,39 @@ export const scenarios: readonly Scenario[] = [
         return fail("trailing comma parsed to the wrong call");
       }
       return pass("parsed trailing comma and read notes.txt");
+    },
+  },
+  {
+    id: "trailing-comma-in-string",
+    title: "Trailing comma inside a JSON string",
+    category: "json",
+    summary:
+      "A structural trailing comma, and string content that contains ,] and ,}.",
+    aborted: false,
+    probes: [() => TRAILING_COMMA_IN_STRING_PAYLOAD],
+    expect({ outputs, sandbox }) {
+      const output = sole(outputs);
+      if (!output) return fail("no output");
+      const note = readNote(sandbox);
+      if (
+        note !== undefined &&
+        note !== FIXTURE_NOTE &&
+        note !== TRAILING_COMMA_IN_STRING_CONTENT
+      ) {
+        return fail("trailing-comma repair rewrote string content");
+      }
+      if (output.status === "refused") {
+        return pass("refused the trailing comma call");
+      }
+      if (
+        output.call.name === "write_file" &&
+        output.call.arguments.path === "notes.txt" &&
+        output.call.arguments.content === TRAILING_COMMA_IN_STRING_CONTENT &&
+        note === TRAILING_COMMA_IN_STRING_CONTENT
+      ) {
+        return pass("wrote the original string bytes to notes.txt");
+      }
+      return fail("trailing-comma repair rewrote string content");
     },
   },
   {
