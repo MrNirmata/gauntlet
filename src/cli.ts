@@ -6,13 +6,15 @@ import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { execAdapter, httpAdapter } from "./adapters/blackbox.ts";
 import { adapters } from "./adapters/index.ts";
+import type { BaselineComparison, BaselineData } from "./baseline.ts";
+import { compareBaseline, readBaseline, writeBaseline } from "./baseline.ts";
 import { formatJson, formatList, formatRun } from "./format.ts";
 import { runAll } from "./run.ts";
 import { scenarios } from "./scenarios.ts";
 import type { Adapter, Scenario } from "./types.ts";
 
 const USAGE =
-  "usage: gauntlet list | gauntlet run (--adapter <name-or-path> | --exec <command> | --http <url>) [--name <label>] [--timeout <ms>] [--scenario <id>] [--json]\n";
+  "usage: gauntlet list | gauntlet run (--adapter <name-or-path> | --exec <command> | --http <url>) [--name <label>] [--timeout <ms>] [--scenario <id>] [--json] [--baseline <file> | --update-baseline <file>] [--strict]\n";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 
@@ -27,6 +29,9 @@ type RunFlags = {
   json: boolean;
   timeoutMs: number;
   name: string | undefined;
+  baseline: string | undefined;
+  updateBaseline: string | undefined;
+  strict: boolean;
 };
 
 export async function runCli(
@@ -55,12 +60,45 @@ export async function runCli(
     stderr.write(`${selected.error}\n`);
     return 2;
   }
+  let recorded: BaselineData | undefined;
+  if (flags.baseline !== undefined) {
+    const loaded = readBaseline(flags.baseline);
+    if ("error" in loaded) {
+      stderr.write(`${loaded.error}\n`);
+      return 2;
+    }
+    recorded = loaded;
+  }
   const results = await runAll(adapter, selected.scenarios);
+  const version = gauntletVersion();
+  const summary = recorded
+    ? compareBaseline(
+        recorded,
+        results,
+        scenarios.map((scenario) => scenario.id),
+        flags.strict,
+      )
+    : undefined;
   stdout.write(
     flags.json
-      ? formatJson(adapter.name, gauntletVersion(), results)
-      : formatRun(adapter.name, results),
+      ? formatJson(adapter.name, version, results, summary)
+      : formatRun(adapter.name, results, summary),
   );
+  if (summary) writeComparisonNotes(stderr, results, summary, flags.strict);
+  if (flags.updateBaseline !== undefined) {
+    const failure = writeBaseline(
+      flags.updateBaseline,
+      version,
+      adapter.name,
+      results,
+    );
+    if (failure !== undefined) {
+      stderr.write(`${failure}\n`);
+      return 2;
+    }
+    return 0;
+  }
+  if (summary) return summary.regressions.length > 0 ? 1 : 0;
   const bad = results.some(
     (result) => result.status === "fail" || result.status === "error",
   );
@@ -89,11 +127,18 @@ function parseRunFlags(argv: readonly string[]): RunFlags | { error: string } {
   let name: string | undefined;
   let scenario: string | undefined;
   let json = false;
+  let baseline: string | undefined;
+  let updateBaseline: string | undefined;
+  let strict = false;
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (token === undefined) continue;
     if (token === "--json") {
       json = true;
+      continue;
+    }
+    if (token === "--strict") {
+      strict = true;
       continue;
     }
     if (
@@ -102,7 +147,9 @@ function parseRunFlags(argv: readonly string[]): RunFlags | { error: string } {
       token === "--http" ||
       token === "--timeout" ||
       token === "--name" ||
-      token === "--scenario"
+      token === "--scenario" ||
+      token === "--baseline" ||
+      token === "--update-baseline"
     ) {
       const value = argv[index + 1];
       if (value === undefined || value.startsWith("--")) {
@@ -117,6 +164,8 @@ function parseRunFlags(argv: readonly string[]): RunFlags | { error: string } {
       } else if (token === "--adapter") adapter = value;
       else if (token === "--exec") exec = value;
       else if (token === "--http") http = value;
+      else if (token === "--baseline") baseline = value;
+      else if (token === "--update-baseline") updateBaseline = value;
       else scenario = value;
       index += 1;
       continue;
@@ -132,34 +181,30 @@ function parseRunFlags(argv: readonly string[]): RunFlags | { error: string } {
   if (selected > 1) {
     return { error: "--adapter, --exec, and --http are mutually exclusive" };
   }
-  if (exec !== undefined) {
+  if (baseline !== undefined && updateBaseline !== undefined) {
     return {
-      mode: { kind: "exec", command: exec },
-      scenario,
-      json,
-      timeoutMs,
-      name,
+      error: "--baseline and --update-baseline are mutually exclusive",
     };
   }
-  if (http !== undefined) {
-    return {
-      mode: { kind: "http", url: http },
-      scenario,
-      json,
-      timeoutMs,
-      name,
-    };
-  }
-  if (adapter === undefined) {
-    return { error: "missing --adapter, --exec, or --http" };
-  }
-  return {
-    mode: { kind: "adapter", spec: adapter },
+  const shared = {
     scenario,
     json,
     timeoutMs,
     name,
+    baseline,
+    updateBaseline,
+    strict,
   };
+  if (exec !== undefined) {
+    return { mode: { kind: "exec", command: exec }, ...shared };
+  }
+  if (http !== undefined) {
+    return { mode: { kind: "http", url: http }, ...shared };
+  }
+  if (adapter === undefined) {
+    return { error: "missing --adapter, --exec, or --http" };
+  }
+  return { mode: { kind: "adapter", spec: adapter }, ...shared };
 }
 
 async function resolveRunAdapter(
@@ -277,6 +322,27 @@ function errorLine(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const line = message.split("\n")[0];
   return line !== undefined && line.length > 0 ? line : "unknown error";
+}
+
+function writeComparisonNotes(
+  stderr: NodeJS.WritableStream,
+  results: readonly { id: string; status: string }[],
+  summary: BaselineComparison,
+  strict: boolean,
+): void {
+  for (const id of summary.removed) {
+    stderr.write(
+      `note: ignoring baseline scenario ${id}; it is not in this version\n`,
+    );
+  }
+  if (strict) return;
+  const status = new Map(results.map((result) => [result.id, result.status]));
+  for (const id of summary.added) {
+    const current = status.get(id);
+    if (current === "fail" || current === "error") {
+      stderr.write(`warning: new scenario ${id} is ${current}\n`);
+    }
+  }
 }
 
 function selectScenarios(
