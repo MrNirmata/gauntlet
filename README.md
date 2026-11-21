@@ -6,6 +6,8 @@ Gauntlet feeds adversarial tool-call payloads to an adapter and prints pass, fai
 
 Gauntlet requires Node 22.
 
+`npx @mrnirmata/gauntlet run --adapter reference-hardened` runs the package. Install it with `npm i -D @mrnirmata/gauntlet`.
+
 ```
 pnpm install
 pnpm build
