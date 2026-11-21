@@ -1,3 +1,5 @@
+import type { Adapter } from "./types.ts";
+
 export { adapters } from "./adapters/index.ts";
 export { referenceHardened, referenceNaive } from "./adapters/reference.ts";
 export { runAll, runScenario } from "./run.ts";
@@ -14,3 +16,7 @@ export type {
   Scenario,
   ToolCall,
 } from "./types.ts";
+
+export function defineAdapter(adapter: Adapter): Adapter {
+  return adapter;
+}

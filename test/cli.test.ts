@@ -111,6 +111,166 @@ test("unknown adapter exits 2", async () => {
   expect(stdout.text()).toBe("");
 });
 
+test("file adapter matches the named adapter", async () => {
+  const byName = memoryStream();
+  const byNameErr = memoryStream();
+  const byFile = memoryStream();
+  const byFileErr = memoryStream();
+  const nameCode = await runCli(
+    ["run", "--adapter", "reference-naive", "--json"],
+    byName.stream,
+    byNameErr.stream,
+  );
+  const fileCode = await runCli(
+    ["run", "--adapter", "./test/fixtures/reference-naive.mjs", "--json"],
+    byFile.stream,
+    byFileErr.stream,
+  );
+  expect(fileCode).toBe(nameCode);
+  expect(byFileErr.text()).toBe("");
+  expect(readReport(byFile.text())).toEqual(readReport(byName.text()));
+});
+
+test("named adapter export matches the named adapter", async () => {
+  const byName = memoryStream();
+  const byFile = memoryStream();
+  const byFileErr = memoryStream();
+  const nameCode = await runCli(
+    [
+      "run",
+      "--adapter",
+      "reference-naive",
+      "--scenario",
+      "truncated-json",
+      "--json",
+    ],
+    byName.stream,
+    memoryStream().stream,
+  );
+  const fileCode = await runCli(
+    [
+      "run",
+      "--adapter",
+      "test/fixtures/named-adapter.mjs",
+      "--scenario",
+      "truncated-json",
+      "--json",
+    ],
+    byFile.stream,
+    byFileErr.stream,
+  );
+  expect(fileCode).toBe(nameCode);
+  expect(byFileErr.text()).toBe("");
+  expect(readReport(byFile.text())).toEqual(readReport(byName.text()));
+});
+
+test("missing adapter file exits 2", async () => {
+  const stdout = memoryStream();
+  const stderr = memoryStream();
+  const missing = path.resolve("test/fixtures/missing-adapter.mjs");
+  const code = await runCli(
+    ["run", "--adapter", missing],
+    stdout.stream,
+    stderr.stream,
+  );
+  expect(code).toBe(2);
+  expect(stderr.text()).toBe(`adapter file not found: ${missing}\n`);
+  expect(stdout.text()).toBe("");
+});
+
+test("failed adapter import exits 2", async () => {
+  const stdout = memoryStream();
+  const stderr = memoryStream();
+  const code = await runCli(
+    ["run", "--adapter", "./test/fixtures/broken-adapter.mjs"],
+    stdout.stream,
+    stderr.stream,
+  );
+  expect(code).toBe(2);
+  expect(stderr.text()).toBe(
+    "could not load adapter ./test/fixtures/broken-adapter.mjs: adapter exploded\n",
+  );
+  expect(stdout.text()).toBe("");
+});
+
+test("adapter module without a valid adapter exits 2", async () => {
+  const stdout = memoryStream();
+  const stderr = memoryStream();
+  const code = await runCli(
+    ["run", "--adapter", "test/fixtures/not-an-adapter.mjs"],
+    stdout.stream,
+    stderr.stream,
+  );
+  expect(code).toBe(2);
+  expect(stderr.text()).toBe(
+    "invalid adapter test/fixtures/not-an-adapter.mjs\n",
+  );
+  expect(stdout.text()).toBe("");
+});
+
+test("typescript adapter loads when node strips types", () => {
+  const cli = path.resolve("dist/cli.js");
+  const result = spawnSync(
+    process.execPath,
+    [
+      cli,
+      "run",
+      "--adapter",
+      "./test/fixtures/strip-me.ts",
+      "--scenario",
+      "truncated-json",
+      "--json",
+    ],
+    { encoding: "utf8" },
+  );
+  expect(result.status).toBe(0);
+  expect(result.stderr).toBe("");
+  const report = readReport(result.stdout);
+  expect(report.adapter).toBe("strip-me");
+  expect(report.scenarios[0]?.status).toBe("pass");
+});
+
+test("typescript adapter without type stripping exits 2", () => {
+  const cli = path.resolve("dist/cli.js");
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--no-experimental-strip-types",
+      cli,
+      "run",
+      "--adapter",
+      "./test/fixtures/strip-me.ts",
+    ],
+    { encoding: "utf8" },
+  );
+  expect(result.status).toBe(2);
+  expect(result.stderr).toBe(
+    "could not load adapter ./test/fixtures/strip-me.ts: compile it to .js or run through tsx\n",
+  );
+  expect(result.stdout).toBe("");
+});
+
+test("adapter template refuses a truncated tool call", () => {
+  const cli = path.resolve("dist/cli.js");
+  const result = spawnSync(
+    process.execPath,
+    [
+      cli,
+      "run",
+      "--adapter",
+      "./examples/adapter-template.mjs",
+      "--scenario",
+      "truncated-json",
+    ],
+    { encoding: "utf8" },
+  );
+  expect(result.status).toBe(0);
+  expect(result.stderr).toBe("");
+  expect(result.stdout).toContain("truncated-json");
+  expect(result.stdout).toContain("pass");
+  expect(result.stdout).toContain("refused truncated JSON");
+});
+
 test("tsx cli list smoke", () => {
   const tsx = path.join(process.cwd(), "node_modules", ".bin", "tsx");
   const result = spawnSync(tsx, ["src/cli.ts", "list"], {

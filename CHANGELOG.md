@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Load a user adapter from a file with `gauntlet run --adapter <path>`.
+- Export `defineAdapter` so an adapter module can be typechecked.
+
 ## 0.1.1
 
 - Fix the CLI exiting 0 without running when npm invokes it through the bin symlink.

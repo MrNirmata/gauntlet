@@ -21,6 +21,18 @@ node dist/cli.js run --adapter reference-naive
 `scenarios` lists `id`, `category`, `status`, and `reason`. `totals` is `pass`, `fail`, `error`, and `notCovered`.
 The exit code stays 0 when every scenario passes or is not covered. A not-covered row is left out of pass and fail.
 
+## Test your own parser
+
+`--adapter` accepts a built-in name or a path to a module. A path starts with `.` or `/`, or ends in `.js`, `.mjs`, `.ts`, or `.mts`.
+
+```
+node dist/cli.js run --adapter ./examples/adapter-template.mjs
+```
+
+The module's default export, or a named export `adapter`, must be an object with a non-empty `name` and a `run` function. `defineAdapter` from `@mrnirmata/gauntlet` returns that object and checks the type.
+
+Node loads a `.ts` adapter when it can strip types: Node 22.6 with `--experimental-strip-types`, or a Node 22 that strips types by default. If Node cannot load the TypeScript file, compile it to `.js` or run Gauntlet through `tsx`.
+
 ## Naive run
 
 `node dist/cli.js run --adapter reference-naive`
@@ -64,7 +76,7 @@ oversized-argument        size        fail    wrote an oversized argument
 
 ## Write an adapter
 
-An adapter parses the raw tool call and returns an executed call or a refusal. CONTRIBUTING.md has the steps.
+An adapter parses the raw tool call and returns an executed call or a refusal. Pass a file path to `--adapter` to test a parser outside this repo. CONTRIBUTING.md has the steps.
 
 ```ts
 type Adapter = {

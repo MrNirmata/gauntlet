@@ -27,7 +27,23 @@ The test in `test/scenarios.test.ts` already runs every scenario against both ad
 
 ## Add an adapter
 
-Implement the `Adapter` type and append it to the `adapters` array in `src/adapters/reference.ts`. Move that array out of the reference file if a second module needs to register there.
+Outside this repo, point `--adapter` at a file. `examples/adapter-template.mjs` is a working starting point. `defineAdapter` checks the type and returns the same object.
+
+```ts
+import { defineAdapter } from "@mrnirmata/gauntlet";
+
+export default defineAdapter({
+  name: "my-agent",
+  async run({ raw, sandboxDir, aborted }) {
+    if (aborted) return { status: "refused", reason: "stream aborted" };
+    const call = parse(raw);
+    if (!call) return { status: "refused", reason: "could not parse" };
+    return executeInside(sandboxDir, call);
+  },
+});
+```
+
+To add a built-in adapter here, implement the `Adapter` type and append it to the `adapters` array in `src/adapters/reference.ts`. Move that array out of the reference file if a second module needs to register there.
 
 ```ts
 const mine: Adapter = {
