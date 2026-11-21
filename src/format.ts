@@ -50,23 +50,26 @@ export function formatJson(
 
 function summaryLine(results: readonly Result[]): string {
   const totals = count(results);
-  return `${totals.pass} passed, ${totals.fail} failed, ${totals.error} errors`;
+  return `${totals.pass} passed, ${totals.fail} failed, ${totals.error} errors, ${totals.notCovered} not covered`;
 }
 
 function count(results: readonly Result[]): {
   pass: number;
   fail: number;
   error: number;
+  notCovered: number;
 } {
   let pass = 0;
   let fail = 0;
   let error = 0;
+  let notCovered = 0;
   for (const result of results) {
     if (result.status === "pass") pass += 1;
     else if (result.status === "fail") fail += 1;
+    else if (result.status === "not-covered") notCovered += 1;
     else error += 1;
   }
-  return { pass, fail, error };
+  return { pass, fail, error, notCovered };
 }
 
 function renderTable(

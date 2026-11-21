@@ -18,6 +18,16 @@ export async function runScenario(
         }),
       );
     }
+    const uncovered = outputs.find((output) => output.status === "not-covered");
+    if (uncovered) {
+      return {
+        id: scenario.id,
+        title: scenario.title,
+        category: scenario.category,
+        status: "not-covered",
+        reason: oneLine(uncovered.reason),
+      };
+    }
     const check = scenario.expect({ outputs, sandbox });
     return {
       id: scenario.id,

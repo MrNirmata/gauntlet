@@ -1,4 +1,5 @@
 node_modules
 dist
 coverage
+third_party
 .DS_Store

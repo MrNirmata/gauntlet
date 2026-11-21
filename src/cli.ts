@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
-import { adapters } from "./adapters/reference.ts";
+import { adapters } from "./adapters/index.ts";
 import { formatJson, formatList, formatRun } from "./format.ts";
 import { runAll } from "./run.ts";
 import { scenarios } from "./scenarios.ts";
@@ -54,7 +54,10 @@ export async function runCli(
       ? formatJson(adapter.name, gauntletVersion(), results)
       : formatRun(adapter.name, results),
   );
-  return results.every((result) => result.status === "pass") ? 0 : 1;
+  const bad = results.some(
+    (result) => result.status === "fail" || result.status === "error",
+  );
+  return bad ? 1 : 0;
 }
 
 function gauntletVersion(): string {
