@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 
-import { readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { adapters } from "./adapters/index.ts";
 import { formatJson, formatList, formatRun } from "./format.ts";
 import { runAll } from "./run.ts";
 import { scenarios } from "./scenarios.ts";
-import type { Scenario } from "./types.ts";
+import type { Adapter, Scenario } from "./types.ts";
 
 const USAGE =
-  "usage: gauntlet list | gauntlet run --adapter <name> [--scenario <id>] [--json]\n";
+  "usage: gauntlet list | gauntlet run --adapter <name-or-path> [--scenario <id>] [--json]\n";
 
 type RunFlags = {
   adapter: string;
@@ -37,11 +38,8 @@ export async function runCli(
     stderr.write(`${flags.error}\n`);
     return 2;
   }
-  const adapter = adapters.find((item) => item.name === flags.adapter);
-  if (!adapter) {
-    stderr.write(`unknown adapter ${flags.adapter}\n`);
-    return 2;
-  }
+  const adapter = await resolveAdapter(flags.adapter, stderr);
+  if (!adapter) return 2;
   const selected = selectScenarios(flags.scenario);
   if ("error" in selected) {
     stderr.write(`${selected.error}\n`);
@@ -98,6 +96,100 @@ function parseRunFlags(argv: readonly string[]): RunFlags | { error: string } {
   }
   if (adapter === undefined) return { error: "missing --adapter" };
   return { adapter, scenario, json };
+}
+
+async function resolveAdapter(
+  spec: string,
+  stderr: NodeJS.WritableStream,
+): Promise<Adapter | undefined> {
+  if (!isAdapterPath(spec)) {
+    const adapter = adapters.find((item) => item.name === spec);
+    if (!adapter) stderr.write(`unknown adapter ${spec}\n`);
+    return adapter;
+  }
+  return loadAdapterFile(spec, stderr);
+}
+
+function isAdapterPath(spec: string): boolean {
+  return (
+    spec.startsWith(".") ||
+    spec.startsWith("/") ||
+    spec.endsWith(".js") ||
+    spec.endsWith(".mjs") ||
+    spec.endsWith(".ts") ||
+    spec.endsWith(".mts")
+  );
+}
+
+async function loadAdapterFile(
+  spec: string,
+  stderr: NodeJS.WritableStream,
+): Promise<Adapter | undefined> {
+  const resolved = path.resolve(process.cwd(), spec);
+  if (!existsSync(resolved)) {
+    stderr.write(`adapter file not found: ${spec}\n`);
+    return undefined;
+  }
+  try {
+    const imported: unknown = await import(pathToFileURL(resolved).href);
+    const adapter = adapterFromModule(imported);
+    if (!adapter) {
+      stderr.write(`invalid adapter ${spec}\n`);
+      return undefined;
+    }
+    return adapter;
+  } catch (error) {
+    stderr.write(`${adapterLoadError(spec, resolved, error)}\n`);
+    return undefined;
+  }
+}
+
+function adapterFromModule(mod: unknown): Adapter | undefined {
+  if (typeof mod !== "object" || mod === null) return undefined;
+  if ("default" in mod && isAdapter(mod.default)) return mod.default;
+  if ("adapter" in mod && isAdapter(mod.adapter)) return mod.adapter;
+  return undefined;
+}
+
+function isAdapter(value: unknown): value is Adapter {
+  if (typeof value !== "object" || value === null) return false;
+  if (!("name" in value) || !("run" in value)) return false;
+  return (
+    typeof value.name === "string" &&
+    value.name.length > 0 &&
+    typeof value.run === "function"
+  );
+}
+
+function adapterLoadError(
+  spec: string,
+  resolved: string,
+  error: unknown,
+): string {
+  if (isTypeScriptFile(resolved) && isTypeStripFailure(error)) {
+    return `could not load adapter ${spec}: compile it to .js or run through tsx`;
+  }
+  return `could not load adapter ${spec}: ${errorLine(error)}`;
+}
+
+function isTypeScriptFile(file: string): boolean {
+  return file.endsWith(".ts") || file.endsWith(".mts");
+}
+
+function isTypeStripFailure(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+  return (
+    error.code === "ERR_UNKNOWN_FILE_EXTENSION" ||
+    error.code === "ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX"
+  );
+}
+
+function errorLine(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const line = message.split("\n")[0];
+  return line !== undefined && line.length > 0 ? line : "unknown error";
 }
 
 function selectScenarios(
