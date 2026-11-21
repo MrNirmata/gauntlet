@@ -57,6 +57,21 @@ gauntlet run --exec "python3 examples/python-adapter.py"
 
 From a checkout, the same run is `node dist/cli.js run --exec "python3 examples/python-adapter.py"`.
 
+## Baseline
+
+`--update-baseline <file>` writes the current results and exits 0. `--baseline <file>` compares a run to that file. The run exits 1 when a scenario regresses, and exits 0 when the recorded results hold.
+
+```
+node dist/cli.js run --adapter reference-naive --update-baseline baseline.json
+node dist/cli.js run --adapter reference-naive --baseline baseline.json
+```
+
+The file holds `gauntletVersion`, `adapter`, and `scenarios`. Scenario ids are sorted. Each value is `pass`, `fail`, `error`, or `not-covered`.
+
+A regression is `pass` or `not-covered` in the file and `fail` or `error` now. `fail` or `error` in the file and `pass` now is an improvement. A scenario this version runs that the file does not name is new. A new `fail` or `error` prints a warning. `--strict` counts it as a regression. A name in the file that this version does not run is ignored. The report lists regressions, improvements, and new scenarios, and says to rerun with `--update-baseline` when something improved. `--json` adds `baseline` with `regressions`, `improvements`, and `new`.
+
+`--baseline` and `--update-baseline` are mutually exclusive. A missing or invalid baseline file exits 2.
+
 ## Naive run
 
 `node dist/cli.js run --adapter reference-naive`

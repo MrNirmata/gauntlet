@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Compare a run with `--baseline` and record the current results with `--update-baseline`.
 - Run a program that is not a JavaScript adapter with `--exec <command>` or `--http <url>`.
 - Load a user adapter from a file with `gauntlet run --adapter <path>`.
 - Export `defineAdapter` so an adapter module can be typechecked.

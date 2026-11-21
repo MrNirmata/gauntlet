@@ -1,3 +1,4 @@
+import type { BaselineComparison } from "./baseline.ts";
 import type { Result } from "./types.ts";
 
 type ListRow = {
@@ -18,6 +19,7 @@ export function formatList(scenarios: readonly ListRow[]): string {
 export function formatRun(
   adapterName: string,
   results: readonly Result[],
+  baseline?: BaselineComparison,
 ): string {
   const rows = results.map((result) => [
     result.id,
@@ -26,13 +28,16 @@ export function formatRun(
     result.reason,
   ]);
   const table = renderTable(rows, ["scenario", "category", "status", "reason"]);
-  return `adapter: ${adapterName}\n\n${table}\n\n${summaryLine(results)}\n`;
+  const report = `adapter: ${adapterName}\n\n${table}\n\n${summaryLine(results)}\n`;
+  const extra = formatBaseline(baseline);
+  return extra.length === 0 ? report : `${report}\n${extra}`;
 }
 
 export function formatJson(
   adapterName: string,
   version: string,
   results: readonly Result[],
+  baseline?: BaselineComparison,
 ): string {
   const report = {
     adapter: adapterName,
@@ -44,8 +49,40 @@ export function formatJson(
       reason: result.reason,
     })),
     totals: count(results),
+    ...(baseline
+      ? {
+          baseline: {
+            regressions: baseline.regressions,
+            improvements: baseline.improvements,
+            new: baseline.added,
+          },
+        }
+      : {}),
   };
   return `${JSON.stringify(report, null, 2)}\n`;
+}
+
+function formatBaseline(baseline: BaselineComparison | undefined): string {
+  if (!baseline) return "";
+  const lines: string[] = [];
+  appendGroup(lines, "regressions", baseline.regressions);
+  appendGroup(lines, "improvements", baseline.improvements);
+  appendGroup(lines, "new", baseline.added);
+  if (baseline.improvements.length > 0) {
+    lines.push("rerun with --update-baseline to record improvements");
+  }
+  if (lines.length === 0) return "";
+  return `${lines.join("\n")}\n`;
+}
+
+function appendGroup(
+  lines: string[],
+  label: string,
+  ids: readonly string[],
+): void {
+  if (ids.length === 0) return;
+  lines.push(`${label}:`);
+  for (const id of ids) lines.push(`  ${id}`);
 }
 
 function summaryLine(results: readonly Result[]): string {
