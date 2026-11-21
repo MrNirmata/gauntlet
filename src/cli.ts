@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
-import { adapters } from "./adapters/reference.ts";
+import { adapters } from "./adapters/index.ts";
 import { formatJson, formatList, formatRun } from "./format.ts";
 import { runAll } from "./run.ts";
 import { scenarios } from "./scenarios.ts";

@@ -23,5 +23,6 @@ Adapters:
 
 - reference-naive
 - reference-hardened
+- nanocoder (see SCOREBOARD.md)
 
 `gauntlet run --json` prints `adapter`, `gauntletVersion`, `scenarios`, and `totals`.

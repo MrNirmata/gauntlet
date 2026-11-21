@@ -76,5 +76,5 @@ type Adapter = {
 ## Roadmap
 
 - Adapters for a real XML tool-call parser, an OpenAI or Anthropic function-call JSON layer, and an MCP filesystem server.
-- A public scoreboard.
+- A public scoreboard. See [SCOREBOARD.md](SCOREBOARD.md).
 - More scenarios.
