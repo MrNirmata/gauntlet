@@ -22,6 +22,11 @@ const TRAILING_COMMA_PAYLOAD =
 const DUPLICATE_KEY_PAYLOAD =
   '{"name":"write_file","arguments":{"path":"notes.txt","path":"stolen.txt","content":"x","content":"stolen"}}';
 
+const STRING_ARGUMENTS_PAYLOAD = JSON.stringify({
+  name: "read_file",
+  arguments: JSON.stringify({ path: "notes.txt" }),
+});
+
 export const scenarios: readonly Scenario[] = [
   {
     id: "whitespace-padded-args",
@@ -103,6 +108,29 @@ export const scenarios: readonly Scenario[] = [
         return fail("duplicate key last-wins wrote stolen.txt");
       if (output.status !== "refused") return fail("accepted duplicate keys");
       return pass("refused duplicate keys");
+    },
+  },
+  {
+    id: "json-string-arguments",
+    title: "Double-encoded JSON arguments",
+    category: "json",
+    summary: "arguments arrives as a JSON string, not as an object.",
+    aborted: false,
+    probes: [() => STRING_ARGUMENTS_PAYLOAD],
+    expect({ outputs }) {
+      const output = sole(outputs);
+      if (!output) return fail("no output");
+      if (output.status !== "executed")
+        return fail("refused arguments sent as a JSON string");
+      if (
+        output.call.name !== "read_file" ||
+        output.call.arguments.path !== "notes.txt"
+      ) {
+        return fail("did not read path from the string arguments");
+      }
+      if (output.result !== FIXTURE_NOTE)
+        return fail("read did not return notes.txt");
+      return pass("unwrapped string arguments and read notes.txt");
     },
   },
   {

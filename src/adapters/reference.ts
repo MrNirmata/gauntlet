@@ -19,6 +19,7 @@ type Policy = {
   trimIdentifiers: boolean;
   repairTrailingCommas: boolean;
   rejectDuplicateKeys: boolean;
+  unwrapStringArguments: boolean;
   executeTruncatedJson: boolean;
   jailPaths: boolean;
   honorAbort: boolean;
@@ -32,6 +33,7 @@ const naivePolicy: Policy = {
   trimIdentifiers: false,
   repairTrailingCommas: false,
   rejectDuplicateKeys: false,
+  unwrapStringArguments: false,
   executeTruncatedJson: true,
   jailPaths: false,
   honorAbort: false,
@@ -43,6 +45,7 @@ const hardenedPolicy: Policy = {
   trimIdentifiers: true,
   repairTrailingCommas: true,
   rejectDuplicateKeys: true,
+  unwrapStringArguments: true,
   executeTruncatedJson: false,
   jailPaths: true,
   honorAbort: true,
@@ -143,10 +146,13 @@ function parseJson(raw: string, policy: Policy): Parsed {
   if (policy.rejectDuplicateKeys && duplicateArgumentKey(raw)) {
     return { ok: false, reason: "duplicate key" };
   }
-  const direct = tryParseCall(raw);
+  const direct = tryParseCall(raw, policy.unwrapStringArguments);
   if (direct.ok) return direct;
   if (policy.repairTrailingCommas) {
-    const repaired = tryParseCall(raw.replace(/,\s*([}\]])/g, "$1"));
+    const repaired = tryParseCall(
+      raw.replace(/,\s*([}\]])/g, "$1"),
+      policy.unwrapStringArguments,
+    );
     if (repaired.ok) return repaired;
     return { ok: false, reason: "truncated or invalid JSON" };
   }
@@ -167,9 +173,9 @@ function parseTruncated(raw: string): Parsed {
   return { ok: true, call: { name, arguments: args } };
 }
 
-function tryParseCall(raw: string): Parsed {
+function tryParseCall(raw: string, unwrapString = false): Parsed {
   try {
-    return callFromValue(parseUnknown(raw));
+    return callFromValue(parseUnknown(raw), unwrapString);
   } catch {
     return { ok: false, reason: "invalid JSON" };
   }
@@ -179,7 +185,7 @@ function parseUnknown(raw: string): unknown {
   return JSON.parse(raw);
 }
 
-function callFromValue(value: unknown): Parsed {
+function callFromValue(value: unknown, unwrapString: boolean): Parsed {
   if (typeof value !== "object" || value === null) {
     return { ok: false, reason: "truncated or invalid JSON" };
   }
@@ -187,7 +193,7 @@ function callFromValue(value: unknown): Parsed {
     return { ok: false, reason: "truncated or invalid JSON" };
   }
   const name = value.name;
-  const args = value.arguments;
+  const args = unwrapString ? unwrapOnce(value.arguments) : value.arguments;
   if (
     typeof name !== "string" ||
     typeof args !== "object" ||
@@ -203,11 +209,29 @@ function callFromValue(value: unknown): Parsed {
   return { ok: true, call: { name, arguments: argumentsRecord } };
 }
 
+// Some providers send `arguments` as a JSON string. Decode it one level only.
+// A string that decodes to another string stays a string and is refused.
+function unwrapOnce(args: unknown): unknown {
+  if (typeof args !== "string") return args;
+  try {
+    return parseUnknown(args);
+  } catch {
+    return args;
+  }
+}
+
 function duplicateArgumentKey(json: string): boolean {
   const marker = '"arguments"';
   const argsAt = json.indexOf(marker);
   if (argsAt < 0) return false;
-  const start = json.indexOf("{", argsAt + marker.length);
+  const valueAt = argsAt + marker.length;
+  const lead = /^\s*:\s*/.exec(json.slice(valueAt))?.[0].length;
+  if (lead !== undefined && json[valueAt + lead] === '"') {
+    // arguments is a JSON string, so check the keys inside it too
+    const inner = readString(json, valueAt + lead);
+    return inner ? duplicateArgumentKey(`{"arguments":${inner.value}}`) : false;
+  }
+  const start = json.indexOf("{", valueAt);
   if (start < 0) return false;
   const keys: string[] = [];
   let depth = 0;
