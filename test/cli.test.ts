@@ -1,5 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
 import { expect, test } from "vitest";
@@ -112,6 +119,25 @@ test("tsx cli list smoke", () => {
   });
   expect(result.status).toBe(0);
   expect(result.stdout).toContain("whitespace-padded-args");
+});
+
+test("built cli runs through a symlink", () => {
+  const cli = path.resolve("dist/cli.js");
+  chmodSync(cli, 0o755);
+  const dir = mkdtempSync(path.join(os.tmpdir(), "gauntlet-bin-"));
+  const link = path.join(dir, "gauntlet");
+  try {
+    symlinkSync(cli, link);
+    const result = spawnSync(link, ["run", "--adapter", "reference-hardened"], {
+      encoding: "utf8",
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(
+      `${scenarios.length} passed, 0 failed, 0 errors, 0 not covered`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 function packageVersion(): string {

@@ -1,6 +1,6 @@
 {
   "name": "@mrnirmata/gauntlet",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Adversarial checks for the code that turns model output into a tool call.",
   "keywords": [
     "tool-call",
@@ -44,10 +44,9 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
-    "test": "vitest run",
+    "test": "tsc && vitest run",
     "lint": "biome check .",
-    "format": "biome check --write .",
-    "postinstall": "mkdir -p node_modules/.bin && printf '%s\\n' '#!/bin/sh' 'exec node \"$(dirname \"$0\")/../../dist/cli.js\" \"$@\"' > node_modules/.bin/gauntlet && chmod +x node_modules/.bin/gauntlet"
+    "format": "biome check --write ."
   },
   "devDependencies": {
     "@biomejs/biome": "^2.6.8",

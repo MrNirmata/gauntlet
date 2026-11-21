@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1
+
+- Fix the CLI exiting 0 without running when npm invokes it through the bin symlink.
+- Remove the postinstall script that rewrote `node_modules/.bin/gauntlet`.
+
 ## 0.1.0
 
 Checks for the code that turns model output into a tool call. The npm package is `@mrnirmata/gauntlet`.

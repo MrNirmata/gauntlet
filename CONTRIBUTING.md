@@ -13,7 +13,7 @@ pnpm typecheck
 pnpm test
 ```
 
-`pnpm exec gauntlet run --adapter reference-naive` exits 1. That is the naive adapter failing the suite. `reference-hardened` exits 0.
+After `pnpm build`, `node dist/cli.js run --adapter reference-naive` exits 1. That is the naive adapter failing the suite. `reference-hardened` exits 0.
 
 ## Add a scenario
 
