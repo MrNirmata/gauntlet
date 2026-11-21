@@ -37,7 +37,7 @@ Node loads a `.ts` adapter when it can strip types: Node 22.6 with `--experiment
 
 `--exec` and `--http` test a program that is not a JavaScript adapter. Python, Rust, and Go fit here. `--adapter`, `--exec`, and `--http` are mutually exclusive, and one of them is required.
 
-`--exec "<command>"` runs the command in a shell for each probe. The working directory is that scenario's sandbox. A relative path in the command is resolved from the directory where you started gauntlet. Gauntlet writes one JSON line to stdin and closes it:
+`--exec "<command>"` runs the command in a shell for each probe. The command runs from the directory you start gauntlet in, and tool paths must be resolved against `sandboxDir`. Gauntlet writes one JSON line to stdin and closes it:
 
 ```
 {"raw": "<model output>", "sandboxDir": "/tmp/gauntlet-…/workspace", "aborted": false}

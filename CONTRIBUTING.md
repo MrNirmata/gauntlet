@@ -69,7 +69,7 @@ Three adapters are intentionally not in v0.1. Open an issue before starting one.
 
 ## Black-box mode
 
-A program that is not a JavaScript module can use `--exec` or `--http`. Each probe is one JSON object with `raw`, `sandboxDir`, and `aborted`. The reply is one `RunOutput` object. The program performs the tool call in the sandbox. `examples/python-adapter.py` is a standard-library example.
+A program that is not a JavaScript module can use `--exec` or `--http`. Each probe is one JSON object with `raw`, `sandboxDir`, and `aborted`. The reply is one `RunOutput` object. The command runs from the directory you start gauntlet in, and tool paths must be resolved against `sandboxDir`. `examples/python-adapter.py` is a standard-library example.
 
 ```
 gauntlet run --exec "python3 examples/python-adapter.py"
@@ -77,4 +77,4 @@ gauntlet run --exec "python3 examples/python-adapter.py"
 
 ## Sandbox
 
-The runner creates the temp directory. The adapter may only touch `sandboxDir`. The `--exec` shell starts in that same directory.
+The runner creates the temp directory. The adapter may only touch `sandboxDir`.

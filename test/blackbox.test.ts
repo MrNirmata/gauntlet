@@ -27,7 +27,7 @@ test("exec adapter matches reference-naive", async () => {
   expect(execReport.scenarios).toEqual(naiveReport.scenarios);
 });
 
-test("exec stdin protocol uses the sandbox as cwd", async () => {
+test("exec stdin protocol sends one JSON probe", async () => {
   for (const [id, aborted] of [
     ["truncated-json", "false"],
     ["stream-aborted", "true"],

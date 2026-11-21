@@ -11,7 +11,6 @@ process.stdin.on("end", () => {
   if (typeof input.raw !== "string") problems.push("raw");
   if (typeof input.sandboxDir !== "string") problems.push("sandboxDir");
   if (input.aborted !== expected) problems.push("aborted");
-  if (process.cwd() !== input.sandboxDir) problems.push("cwd");
   process.stderr.write(
     problems.length === 0 ? "protocol-ok" : problems.join(","),
   );

@@ -1,6 +1,4 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import path from "node:path";
 import type {
   Adapter,
   AdapterRunInput,
@@ -9,11 +7,6 @@ import type {
 } from "../types.ts";
 
 const SNIPPET_LIMIT = 200;
-
-// The shell cwd is the sandbox, so `python3 examples/python-adapter.py`
-// would miss. A relative path that exists where gauntlet was started is
-// rewritten to an absolute path. Absolute paths stay with the shell.
-const RELATIVE_PATH = /(^|\s)((?:\.\.\/|\.\/)?[\w.-]+(?:\/[\w.-]+)+)(?=\s|$)/g;
 
 export function execAdapter(
   command: string,
@@ -47,9 +40,9 @@ function runCommand(
   timeoutMs: number,
 ): Promise<RunOutput> {
   return new Promise((resolve, reject) => {
-    const child = spawn(locateCommand(command), {
+    const child = spawn(command, {
       shell: true,
-      cwd: input.sandboxDir,
+      cwd: process.cwd(),
       detached: true,
       stdio: "pipe",
     });
@@ -202,21 +195,6 @@ function asToolCall(value: unknown): ToolCall | undefined {
     argumentsRecord[key] = entry;
   }
   return { name: value.name, arguments: argumentsRecord };
-}
-
-function locateCommand(command: string): string {
-  return command.replaceAll(
-    RELATIVE_PATH,
-    (match, lead: string, token: string) => {
-      const candidate = path.resolve(process.cwd(), token);
-      if (!existsSync(candidate)) return match;
-      return `${lead}${shellQuote(candidate)}`;
-    },
-  );
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 // `shell: true` runs sh, and the command is sh's child. Killing the
