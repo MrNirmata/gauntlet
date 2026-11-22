@@ -224,13 +224,13 @@ test("adapter, exec, and http conflict exits 2", async () => {
     expect(result.code, argv.join(" ")).toBe(2);
     expect(result.stdout, argv.join(" ")).toBe("");
     expect(result.stderr, argv.join(" ")).toBe(
-      "--adapter, --exec, and --http are mutually exclusive\n",
+      "--adapter, --exec, --http, and --mcp are mutually exclusive\n",
     );
   }
   const missing = await run(["run", "--json"]);
   expect(missing.code).toBe(2);
   expect(missing.stdout).toBe("");
-  expect(missing.stderr).toBe("missing --adapter, --exec, or --http\n");
+  expect(missing.stderr).toBe("missing --adapter, --exec, --http, or --mcp\n");
 });
 
 test.skipIf(python3.status !== 0)(

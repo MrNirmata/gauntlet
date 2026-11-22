@@ -1,6 +1,6 @@
 import { readdirSync } from "node:fs";
 import { FIXTURE_NOTE } from "../sandbox.ts";
-import type { Scenario } from "../types.ts";
+import type { ScenarioCase } from "../types.ts";
 import {
   call,
   fail,
@@ -15,7 +15,7 @@ import {
 const LONE_SURROGATE_PAYLOAD =
   '{"name":"write_file","arguments":{"path":"notes.txt","content":"A\\ud800B"}}';
 
-export const unicodeScenarios: readonly Scenario[] = [
+export const unicodeScenarios: readonly ScenarioCase[] = [
   {
     id: "unicode-zero-width-path",
     title: "Zero-width character in a path",

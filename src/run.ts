@@ -1,5 +1,7 @@
+import { track } from "./cleanup.ts";
 import { asRunOutput } from "./output.ts";
 import { createSandbox, deleteSandbox } from "./sandbox.ts";
+import { splitCall } from "./structured.ts";
 import type {
   Adapter,
   AdapterRunInput,
@@ -10,21 +12,33 @@ import type {
   Scenario,
 } from "./types.ts";
 
+const CLOSE_TIMEOUT_MS = 5000;
+
 export async function runScenario(
   adapter: Adapter,
   scenario: Scenario,
   options: RunOptions = {},
 ): Promise<Result> {
-  const sandbox = createSandbox();
   const probes: ProbeRecord[] = [];
   const finish = (status: Result["status"], reason: string): Result => ({
     id: scenario.id,
     title: scenario.title,
     category: scenario.category,
+    tier: scenario.tier,
     status,
     reason: oneLine(reason),
     probes,
   });
+  // A target that receives parsed calls cannot be asked how it reads text
+  // that is not one.
+  if (options.structured === true && scenario.layer === "parse") {
+    return finish(
+      "not-covered",
+      "the scenario is about reading model output, and this target receives parsed calls",
+    );
+  }
+  const sandbox = createSandbox();
+  const untrack = track(() => deleteSandbox(sandbox));
   try {
     scenario.prepare?.(sandbox);
     const outputs: RunOutput[] = [];
@@ -34,7 +48,7 @@ export async function runScenario(
       try {
         output = await runProbe(
           adapter,
-          { raw, sandboxDir: sandbox.workspaceDir, aborted: scenario.aborted },
+          probeInput(raw, sandbox.workspaceDir, scenario, options),
           options.timeoutMs,
         );
       } catch (error) {
@@ -68,8 +82,32 @@ export async function runScenario(
   } catch (error) {
     return finish("error", errorMessage(error));
   } finally {
+    // The adapter lets go of the sandbox before the sandbox goes away. It
+    // gets a limit, like every other call into an adapter.
+    try {
+      const closing = adapter.close?.();
+      if (closing) await withTimeout(closing, CLOSE_TIMEOUT_MS);
+    } catch {
+      // Stopping failed or never finished. The scenario's result stands.
+    }
+    untrack();
     deleteSandbox(sandbox);
   }
+}
+
+function probeInput(
+  raw: string,
+  sandboxDir: string,
+  scenario: Scenario,
+  options: RunOptions,
+): AdapterRunInput {
+  const input = { raw, sandboxDir, aborted: scenario.aborted };
+  if (options.structured !== true) return input;
+  const split = splitCall(raw);
+  if (!split) {
+    throw new Error(`scenario ${scenario.id} has a payload that is not a call`);
+  }
+  return { ...input, call: split.call };
 }
 
 export async function runAll(

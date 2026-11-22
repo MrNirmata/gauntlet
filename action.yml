@@ -4,14 +4,27 @@ author: MrNirmata
 
 inputs:
   adapter:
-    description: Built-in adapter name or a path to an adapter module. Set exactly one of adapter, exec, or http.
+    description: Built-in adapter name or a path to an adapter module. Set exactly one of adapter, exec, http, or mcp.
     required: false
   exec:
-    description: Shell command for a black-box adapter. Set exactly one of adapter, exec, or http.
+    description: Shell command for a black-box adapter. Set exactly one of adapter, exec, http, or mcp.
     required: false
   http:
-    description: URL of an HTTP adapter. Set exactly one of adapter, exec, or http.
+    description: URL of an HTTP adapter. Set exactly one of adapter, exec, http, or mcp.
     required: false
+  mcp:
+    description: Shell command that starts an MCP server on stdio. {workspace} is the scenario's directory and {cwd} is the working directory. Set exactly one of adapter, exec, http, or mcp.
+    required: false
+  tool:
+    description: With mcp, the server's names for the two tools, as read_file=<name>,write_file=<name>.
+    required: false
+  arg:
+    description: With mcp, the server's names for the two arguments, as path=<name>,content=<name>.
+    required: false
+  structured:
+    description: When true, each probe is sent as a parsed call. mcp always does.
+    required: false
+    default: "false"
   name:
     description: Adapter name recorded in the report.
     required: false
@@ -30,6 +43,18 @@ inputs:
     required: false
   category:
     description: Categories to run instead of the full suite, separated by commas.
+    required: false
+  tier:
+    description: Run only safety or only robustness scenarios.
+    required: false
+  fail-on:
+    description: The tier that fails the step. any, safety, or robustness. The default is any.
+    required: false
+  sarif:
+    description: File to write a SARIF 2.1.0 report to, inside the working directory.
+    required: false
+  sarif-location:
+    description: The file a SARIF viewer opens for a failure.
     required: false
   working-directory:
     description: Directory to run Gauntlet in. A relative path starts at the job workspace.
@@ -87,4 +112,12 @@ runs:
         INPUT_STRICT: ${{ inputs.strict }}
         INPUT_SCENARIO: ${{ inputs.scenario }}
         INPUT_CATEGORY: ${{ inputs.category }}
+        INPUT_MCP: ${{ inputs.mcp }}
+        INPUT_TOOL: ${{ inputs.tool }}
+        INPUT_ARG: ${{ inputs.arg }}
+        INPUT_STRUCTURED: ${{ inputs.structured }}
+        INPUT_TIER: ${{ inputs.tier }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_SARIF: ${{ inputs.sarif }}
+        INPUT_SARIF_LOCATION: ${{ inputs.sarif-location }}
       run: bash "$GITHUB_ACTION_PATH/scripts/action-run.sh"

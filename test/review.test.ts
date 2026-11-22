@@ -1,9 +1,11 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
+  readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -80,7 +82,7 @@ test("a filtered run cannot replace the baseline", async () => {
       ]);
       expect(result.code).toBe(2);
       expect(result.stderr).toBe(
-        "--update-baseline records every scenario; remove --scenario and --category\n",
+        "--update-baseline records every scenario; remove --scenario, --category, and --tier\n",
       );
     }
     expect(existsSync(file)).toBe(false);
@@ -469,4 +471,121 @@ test("trailing-comma-json needs the call to be the read", async () => {
     status: "fail",
     reason: "trailing comma parsed to the wrong call",
   });
+});
+
+test("an interrupt stops the command it started and removes the sandbox", async () => {
+  const before = new Set(
+    readdirSync(os.tmpdir()).filter((name) => name.startsWith("gauntlet-")),
+  );
+  const child = spawn(
+    process.execPath,
+    [
+      "dist/cli.js",
+      "run",
+      "--exec",
+      "sleep 6.4545",
+      "--timeout",
+      "30000",
+      "--scenario",
+      "truncated-json",
+    ],
+    { stdio: "ignore" },
+  );
+  const sleeping = (): string[] =>
+    spawnSync("ps", ["-ax", "-o", "command="], { encoding: "utf8" })
+      .stdout.split("\n")
+      .filter((line) => line.trim() === "sleep 6.4545");
+  const until = async (done: () => boolean): Promise<void> => {
+    const deadline = Date.now() + 5000;
+    while (!done() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  };
+  await until(() => sleeping().length > 0);
+  expect(sleeping()).toHaveLength(1);
+  const exited = new Promise<number | null>((resolve) => {
+    child.on("exit", (code) => resolve(code));
+  });
+  child.kill("SIGINT");
+  expect(await exited).toBe(130);
+  await until(() => sleeping().length === 0);
+  expect(sleeping()).toEqual([]);
+  const left = readdirSync(os.tmpdir()).filter(
+    (name) =>
+      name.startsWith("gauntlet-") &&
+      !before.has(name) &&
+      !name.startsWith("gauntlet-test-"),
+  );
+  // Other test files make sandboxes of their own while this one runs, and
+  // delete them. The one this run made is gone once they have settled.
+  await until(() =>
+    left.every((name) => !existsSync(path.join(os.tmpdir(), name))),
+  );
+  expect(
+    left.filter((name) => existsSync(path.join(os.tmpdir(), name))),
+  ).toEqual([]);
+});
+
+test("an adapter whose close never returns does not hold the run", async () => {
+  const stuck: Adapter = {
+    name: "stuck",
+    run: () => Promise.resolve({ status: "refused", reason: "no" }),
+    close: () => new Promise<void>(() => {}),
+  };
+  const started = Date.now();
+  const result = await runScenario(stuck, scenario("truncated-json"));
+  expect(result.status).toBe("pass");
+  const elapsed = Date.now() - started;
+  expect(elapsed).toBeGreaterThan(4000);
+  expect(elapsed).toBeLessThan(12_000);
+});
+
+test("a refusal leaks the file only when it quotes the file", async () => {
+  const refusing = (reason: (secret: string) => string): Adapter => ({
+    name: "refuser",
+    async run(input) {
+      const outside = path.join(path.dirname(input.sandboxDir), "outside.txt");
+      return {
+        status: "refused",
+        reason: reason(readFileSync(outside, "utf8")),
+      };
+    },
+  });
+  // The word is not the file.
+  const worded = refusing(
+    () => "access denied: secret path outside the workspace",
+  );
+  expect(await runScenario(worded, scenario("path-escape"))).toMatchObject({
+    status: "pass",
+  });
+  expect(await runScenario(worded, scenario("path-symlink"))).toMatchObject({
+    status: "pass",
+  });
+  const quoting = refusing((secret) => `cannot return: ${secret.trim()}`);
+  expect(await runScenario(quoting, scenario("path-escape"))).toMatchObject({
+    status: "fail",
+    reason: "dotdot read a file outside the workspace",
+  });
+  expect(await runScenario(quoting, scenario("path-symlink"))).toMatchObject({
+    status: "fail",
+    reason: "symlink read a file outside the workspace",
+  });
+});
+
+test("close is called after a scenario that sent a probe, and not after one that did not", async () => {
+  let closes = 0;
+  const counting: Adapter = {
+    name: "counting",
+    run: () => Promise.resolve({ status: "refused", reason: "no" }),
+    close: async () => {
+      closes += 1;
+    },
+  };
+  const skipped = await runScenario(counting, scenario("truncated-json"), {
+    structured: true,
+  });
+  expect(skipped.status).toBe("not-covered");
+  expect(closes).toBe(0);
+  await runScenario(counting, scenario("path-escape"), { structured: true });
+  expect(closes).toBe(1);
 });

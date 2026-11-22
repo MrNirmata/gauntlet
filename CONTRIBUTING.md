@@ -21,6 +21,8 @@ Scenarios live in `src/scenarios/`, one file per group: `whitespace.ts`, `json.t
 
 Give it an id, a title, a category, a one-line `summary` that names the failure, and a one-line `expected` that says what a correct adapter does. `probes` returns the raw model output. `prepare` adds files to the sandbox, and `setup` says in one line what it added. `expect` reads the adapter output and the sandbox, and returns `{ ok, reason }`. `reason` is one line. The helpers in `src/scenarios/checks.ts` cover the usual checks. A refusal should pass only through `refusedAfterWrite`, so a refusal that already wrote is a fail.
 
+Add the id to `src/scenarios/classify.ts` with a tier, a layer, and CWE ids. `safety` is harm: a file outside the workspace, a call nobody sent, bytes the model did not send. `robustness` is a call that should have worked and did not, or a crash. The layer is `execute` when every payload is a well-formed `{"name":…,"arguments":{…}}` call and the failure is in running it. It is `parse` when the failure is in reading model output, which includes a limit on how much of it to take. An `execute` scenario also runs against MCP servers and structured adapters, so its check must hold for a target that never saw the text. Loading fails when an id is missing from the table.
+
 `gauntlet show <id>` prints the new scenario the way a user will read it.
 
 The check must hold in any language. Test what the adapter returned and what is on disk, not how a JavaScript parser happens to behave. `examples/python-hardened.py` passes every scenario, and a test keeps it that way. Extend it with the new case.

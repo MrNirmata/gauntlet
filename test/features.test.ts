@@ -68,6 +68,9 @@ test("list --json prints one row per scenario", async () => {
       "id",
       "title",
       "category",
+      "tier",
+      "layer",
+      "cwe",
       "summary",
       "expected",
     ]);
@@ -379,11 +382,14 @@ test("the built package entry runs the suite from code", async () => {
     "adapters",
     "asRunOutput",
     "defineAdapter",
+    "formatSarif",
+    "mcpAdapter",
     "referenceHardened",
     "referenceNaive",
     "runAll",
     "runScenario",
     "scenarios",
+    "splitCall",
   ]);
   const results = await api.runAll(api.referenceHardened, api.scenarios, {
     timeoutMs: 10_000,

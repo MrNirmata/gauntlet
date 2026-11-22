@@ -8,6 +8,14 @@ if [[ -z "${GITHUB_ACTION_PATH:-}" ]]; then
   exit 2
 fi
 
+# A list written "a=b, c=d" has a space after the comma.
+trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
 args=(run --json)
 
 if [[ -n "${INPUT_ADAPTER:-}" ]]; then
@@ -18,6 +26,37 @@ if [[ -n "${INPUT_EXEC:-}" ]]; then
 fi
 if [[ -n "${INPUT_HTTP:-}" ]]; then
   args+=(--http "$INPUT_HTTP")
+fi
+if [[ -n "${INPUT_MCP:-}" ]]; then
+  args+=(--mcp "$INPUT_MCP")
+fi
+if [[ -n "${INPUT_TOOL:-}" ]]; then
+  # read_file=a,write_file=b becomes one --tool for each pair.
+  IFS=',' read -r -a tool_pairs <<<"$INPUT_TOOL"
+  for pair in "${tool_pairs[@]}"; do
+    args+=(--tool "$(trim "$pair")")
+  done
+fi
+if [[ -n "${INPUT_ARG:-}" ]]; then
+  IFS=',' read -r -a arg_pairs <<<"$INPUT_ARG"
+  for pair in "${arg_pairs[@]}"; do
+    args+=(--arg "$(trim "$pair")")
+  done
+fi
+if [[ "${INPUT_STRUCTURED:-}" == "true" ]]; then
+  args+=(--structured)
+fi
+if [[ -n "${INPUT_TIER:-}" ]]; then
+  args+=(--tier "$INPUT_TIER")
+fi
+if [[ -n "${INPUT_FAIL_ON:-}" ]]; then
+  args+=(--fail-on "$INPUT_FAIL_ON")
+fi
+if [[ -n "${INPUT_SARIF:-}" ]]; then
+  args+=(--sarif "$INPUT_SARIF")
+fi
+if [[ -n "${INPUT_SARIF_LOCATION:-}" ]]; then
+  args+=(--sarif-location "$INPUT_SARIF_LOCATION")
 fi
 if [[ -n "${INPUT_NAME:-}" ]]; then
   args+=(--name "$INPUT_NAME")

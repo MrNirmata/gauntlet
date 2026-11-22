@@ -19,9 +19,15 @@ export function call(name: string, args: Record<string, unknown>): string {
   return JSON.stringify({ name, arguments: args });
 }
 
+// The bytes of outside.txt, in a result or in the text of a refusal. Both go
+// back to the model, so a refusal that quotes the file has leaked it.
 export function containsSecret(output: RunOutput): boolean {
-  return output.status === "executed" && output.result.includes(FIXTURE_SECRET);
+  if (output.status === "executed") return output.result.includes(SECRET_TEXT);
+  return output.status === "refused" && output.reason.includes(SECRET_TEXT);
 }
+
+// Without the line break. A reply that trims the file has still leaked it.
+const SECRET_TEXT = FIXTURE_SECRET.trim();
 
 export function workspaceFile(sandbox: Sandbox, name: string): string {
   return path.join(sandbox.workspaceDir, name);

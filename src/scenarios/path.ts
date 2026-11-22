@@ -1,7 +1,7 @@
 import { existsSync, linkSync, readdirSync, symlinkSync } from "node:fs";
 import path from "node:path";
-import { FIXTURE_NOTE, FIXTURE_SECRET } from "../sandbox.ts";
-import type { Scenario } from "../types.ts";
+import { FIXTURE_NOTE } from "../sandbox.ts";
+import type { ScenarioCase } from "../types.ts";
 import {
   call,
   containsSecret,
@@ -18,7 +18,7 @@ import {
 
 const LONG_NAME_LENGTH = 300;
 
-export const pathScenarios: readonly Scenario[] = [
+export const pathScenarios: readonly ScenarioCase[] = [
   {
     id: "path-escape",
     title: "Dotdot and absolute paths",
@@ -104,10 +104,7 @@ export const pathScenarios: readonly Scenario[] = [
     expect({ outputs, sandbox }) {
       const output = sole(outputs);
       if (!output) return fail("no output");
-      if (
-        output.status === "executed" &&
-        output.result.includes(FIXTURE_SECRET)
-      ) {
+      if (containsSecret(output)) {
         return fail("symlink read a file outside the workspace");
       }
       if (output.status !== "refused") return fail("symlink was executed");

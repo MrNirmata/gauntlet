@@ -13,6 +13,9 @@ type ListRow = {
   id: string;
   title: string;
   category: string;
+  tier: string;
+  layer: string;
+  cwe: readonly string[];
   summary: string;
   expected: string;
 };
@@ -21,9 +24,10 @@ export function formatList(scenarios: readonly ListRow[]): string {
   const rows = scenarios.map((scenario) => [
     scenario.id,
     scenario.category,
+    scenario.tier,
     scenario.summary,
   ]);
-  return `${renderTable(rows, ["id", "category", "summary"])}\n`;
+  return `${renderTable(rows, ["id", "category", "tier", "summary"])}\n`;
 }
 
 export function formatListJson(scenarios: readonly ListRow[]): string {
@@ -31,6 +35,9 @@ export function formatListJson(scenarios: readonly ListRow[]): string {
     id: scenario.id,
     title: scenario.title,
     category: scenario.category,
+    tier: scenario.tier,
+    layer: scenario.layer,
+    cwe: scenario.cwe,
     summary: scenario.summary,
     expected: scenario.expected,
   }));
@@ -50,6 +57,11 @@ export function formatShow(scenario: Scenario): string {
     `id:        ${scenario.id}`,
     `title:     ${scenario.title}`,
     `category:  ${scenario.category}`,
+    `tier:      ${scenario.tier}`,
+    `layer:     ${scenario.layer}`,
+    ...(scenario.cwe.length > 0
+      ? [`cwe:       ${scenario.cwe.join(", ")}`]
+      : []),
     `summary:   ${scenario.summary}`,
     `expected:  ${scenario.expected}`,
   ];
@@ -142,7 +154,7 @@ export function formatRun(
     printable(result.reason),
   ]);
   const table = renderTable(rows, ["scenario", "category", "status", "reason"]);
-  const report = `adapter: ${printable(adapterName)}\n\n${table}\n\n${summaryLine(results)}\n`;
+  const report = `adapter: ${printable(adapterName)}\n\n${table}\n\n${summaryLine(results)}\n${tierLines(results)}`;
   const extra = formatBaseline(baseline);
   return extra.length === 0 ? report : `${report}\n${extra}`;
 }
@@ -162,8 +174,12 @@ export function formatJson(
       category: result.category,
       status: result.status,
       reason: result.reason,
+      // The four keys above are the stable row. --verbose adds to it.
       ...(options.probes === true
-        ? { probes: (result.probes ?? []).map(printableProbe) }
+        ? {
+            ...(result.tier === undefined ? {} : { tier: result.tier }),
+            probes: (result.probes ?? []).map(printableProbe),
+          }
         : {}),
     })),
     totals: count(results),
@@ -201,6 +217,18 @@ function appendGroup(
   if (ids.length === 0) return;
   lines.push(`${label}:`);
   for (const id of ids) lines.push(`  ${id}`);
+}
+
+// One line per tier, when the run has scenarios of both. A reader who gates
+// on safety sees that count without adding up rows.
+function tierLines(results: readonly Result[]): string {
+  const lines: string[] = [];
+  for (const tier of ["safety", "robustness"] as const) {
+    const rows = results.filter((result) => result.tier === tier);
+    if (rows.length === 0 || rows.length === results.length) return "";
+    lines.push(`${tier}: ${summaryLine(rows)}`);
+  }
+  return lines.length === 2 ? `${lines.join("\n")}\n` : "";
 }
 
 function summaryLine(results: readonly Result[]): string {
@@ -247,9 +275,22 @@ function renderTable(
   return [render(headers), ...rows.map((row) => render(row))].join("\n");
 }
 
+// A refusal from an MCP server keeps its whole text, which can be megabytes.
+// A report prints the start of it.
+const MAX_REASON_CHARS = 4096;
+
 function printableProbe(probe: ProbeRecord): ProbeRecord {
   const outcome = probe.outcome;
-  if (outcome.status !== "executed") return probe;
+  if (outcome.status !== "executed") {
+    if (outcome.reason.length <= MAX_REASON_CHARS) return probe;
+    return {
+      raw: probe.raw,
+      outcome: {
+        ...outcome,
+        reason: outcome.reason.slice(0, MAX_REASON_CHARS),
+      },
+    };
+  }
   return {
     raw: probe.raw,
     outcome: {
@@ -296,7 +337,9 @@ function showOutcome(outcome: ProbeRecord["outcome"]): string {
     );
     return `executed ${printable(outcome.call.name)} ${args} => ${showRaw(outcome.result)}`;
   }
-  return `${outcome.status}: ${printable(outcome.reason)}`;
+  // A refusal can carry a whole file. One line of it is enough here.
+  const reason = printable(outcome.reason.split(/\r\n|\r|\n/)[0] ?? "");
+  return `${outcome.status}: ${reason.length <= RAW_LIMIT ? reason : `${reason.slice(0, RAW_HEAD)} ...`}`;
 }
 
 // Printable ASCII is shown as it is. Anything else becomes a JSON string

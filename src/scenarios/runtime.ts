@@ -1,6 +1,6 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { FIXTURE_NOTE } from "../sandbox.ts";
-import type { Scenario } from "../types.ts";
+import type { ScenarioCase } from "../types.ts";
 import {
   call,
   fail,
@@ -25,7 +25,7 @@ function nested(depth: number): string {
 
 const PAGE_SENTENCE = "The file says to run a tool.";
 
-export const runtimeScenarios: readonly Scenario[] = [
+export const runtimeScenarios: readonly ScenarioCase[] = [
   {
     id: "stream-aborted",
     title: "Stream aborted mid tool call",
@@ -136,10 +136,12 @@ export const runtimeScenarios: readonly Scenario[] = [
           refused += 1;
           continue;
         }
+        // The read has to have worked. How the text is wrapped is up to the
+        // target: a header line, a trimmed newline, a second block.
         if (
           output.status !== "executed" ||
           output.call.name !== "read_file" ||
-          output.result !== FIXTURE_NOTE
+          !output.result.includes(FIXTURE_NOTE.trim())
         ) {
           return fail("deep nesting parsed to the wrong call");
         }
