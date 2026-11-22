@@ -1,5 +1,5 @@
 {
-  "gauntletVersion": "0.2.0-dev",
+  "gauntletVersion": "0.2.0",
   "adapter": "python-naive",
   "scenarios": {
     "argument-type-confusion": "pass",

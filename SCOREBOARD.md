@@ -1,6 +1,6 @@
 # Scoreboard
 
-Run on 2026-11-22 against the 28 scenarios on this branch. Numbers below are from that run. Nothing here is estimated.
+Run on 2026-11-22 against the 28 scenarios of 0.2.0, on macOS with Node 25.9. Numbers below are from that run. Nothing here is estimated.
 
 ## nanocoder
 
