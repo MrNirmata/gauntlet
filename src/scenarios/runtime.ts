@@ -136,10 +136,12 @@ export const runtimeScenarios: readonly ScenarioCase[] = [
           refused += 1;
           continue;
         }
+        // The read has to have worked. How the text is wrapped is up to the
+        // target: a header line, a trimmed newline, a second block.
         if (
           output.status !== "executed" ||
           output.call.name !== "read_file" ||
-          output.result !== FIXTURE_NOTE
+          !output.result.includes(FIXTURE_NOTE.trim())
         ) {
           return fail("deep nesting parsed to the wrong call");
         }

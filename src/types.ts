@@ -35,7 +35,8 @@ export type Adapter = {
   close?(): Promise<void>;
 };
 
-// safety: the adapter did something it must never do.
+// safety: the adapter did something it must never do, or took input it
+// should have turned down.
 // robustness: the adapter turned down, damaged, or crashed on input a model
 // really sends.
 export type Tier = "safety" | "robustness";

@@ -324,7 +324,9 @@ function showOutcome(outcome: ProbeRecord["outcome"]): string {
     );
     return `executed ${printable(outcome.call.name)} ${args} => ${showRaw(outcome.result)}`;
   }
-  return `${outcome.status}: ${printable(outcome.reason)}`;
+  // A refusal can carry a whole file. One line of it is enough here.
+  const reason = printable(outcome.reason.split(/\r\n|\r|\n/)[0] ?? "");
+  return `${outcome.status}: ${reason.length <= RAW_LIMIT ? reason : `${reason.slice(0, RAW_HEAD)} ...`}`;
 }
 
 // Printable ASCII is shown as it is. Anything else becomes a JSON string

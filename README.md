@@ -63,7 +63,9 @@ truncated-json  fail  executed a truncated tool call
 
 `--junit <file>` also writes the results as JUnit XML. A fail is a `failure`, an error is an `error`, and a not-covered scenario is `skipped`.
 
-`--sarif <file>` also writes the results as SARIF 2.1.0. Each scenario is a rule tagged with its tier, its category, and its CWE ids. A failed safety scenario is an `error`, a failed robustness scenario is a `warning`, and an adapter that threw is an `error`. `--sarif-location <path>` names the file a viewer opens for a failure. It defaults to the adapter module when `--adapter` is a path. A viewer that lists results by file needs one.
+`--sarif <file>` also writes the results as SARIF 2.1.0. Each scenario that ran is a rule tagged with its tier, its category, and its CWE ids. Each scenario that failed or errored is a result. A failed safety scenario is an `error`, a failed robustness scenario is a `warning`, and an adapter that threw is an `error`. A pass is not a finding and is not in the file.
+
+`--sarif-location <path>` names the file a viewer opens for a failure, relative to the directory you run in. It is required, because a viewer that lists findings by file shows nothing for one without a file. It defaults to the adapter module when `--adapter` is a path. `--name` becomes the category of the run, so two targets in one repository do not replace each other's findings.
 
 `--timeout <ms>` is the limit for one probe. The default is 10000. It applies to a module adapter, to `--exec`, and to `--http`. A probe that runs past it is an error. A command is killed at the limit. A module adapter cannot be: one that blocks the event loop is not interrupted, and one that timed out may still be running.
 
@@ -91,18 +93,18 @@ Node loads a `.ts` adapter when it can strip types: Node 22.6 with `--experiment
 
 Every scenario has a tier.
 
-- `safety`: the adapter did something it must never do. It read or wrote outside the workspace, ran a call nobody sent, or wrote bytes the model did not send.
+- `safety`: the adapter did something it must never do. It read or wrote outside the workspace, ran a call nobody sent, wrote bytes the model did not send, or took input it should have turned down.
 - `robustness`: the adapter turned down or damaged a call that should have worked, or it crashed.
 
 A parser that refuses a trailing comma is strict, not unsafe. The two are counted apart, and the report has a line for each.
 
-`--tier safety` runs one tier. `--fail-on safety` runs everything and lets only that tier decide the exit code. The default is `any`.
+`--tier safety` runs one tier. `--fail-on safety` runs everything and lets only that tier decide the exit code. The default is `any`. Filters that leave nothing to run exit 2, and so does a `--fail-on` tier that `--tier` left out.
 
 ```
 node dist/cli.js run --adapter reference-naive --fail-on safety
 ```
 
-Each scenario also has a layer. A `parse` scenario sends text that is not a well-formed call. An `execute` scenario sends a well-formed call, and the failure is in running it. `gauntlet list --json` prints `tier`, `layer`, and `cwe` for each one.
+Each scenario also has a layer. A `parse` scenario is about reading model output: text that is not a well-formed call, or more of it than a reader should take. An `execute` scenario sends a well-formed call, and the failure is in running it. `gauntlet list --json` prints `tier`, `layer`, and `cwe` for each one.
 
 ## Test an MCP server
 
@@ -113,7 +115,7 @@ gauntlet run --mcp "npx -y @modelcontextprotocol/server-filesystem {workspace}"
 gauntlet run --mcp "node {cwd}/dist/server.js {workspace}"
 ```
 
-The server is started once per scenario, in that scenario's workspace. `{workspace}` in the command is the path of that directory. `{cwd}` is the directory you started Gauntlet in. The server does not run there: a probe has a relative path, and a server that resolved it against your project would be reading and writing your project.
+The server is started once per scenario, in that scenario's workspace. `{workspace}` in the command is the path of that directory. `{cwd}` is the directory you started Gauntlet in. Both are already quoted for the shell, so do not put quotes around them. The server does not run there: a probe has a relative path, and a server that resolved it against your project would be reading and writing your project.
 
 The server needs a tool that reads a file and a tool that writes one. `--tool` gives the server's names for the tools, and `--arg` its names for the two arguments.
 
@@ -122,11 +124,17 @@ gauntlet run --mcp "node {cwd}/server.js {workspace}" --tool read_file=read_text
 gauntlet run --mcp "python3 {cwd}/server.py" --tool write_file=save --arg path=file_path --arg content=text
 ```
 
-Gauntlet starts the server once before the run. A command that cannot start, or a server with neither tool, exits 2 with one message that lists the tools the server does have. A server with only one of the two runs, and the scenarios that need the other are `not-covered`.
+Before the run, Gauntlet starts the server once in an empty directory, asks it to write a file there, and asks it to read the file back. A command that cannot start, a server with neither tool, or a server that does not write and read that file exits 2 with one message. The message lists the server's tools, or quotes what the server replied. A server with only one of the two tools runs, and the scenarios that need the other are `not-covered`.
 
-A JSON-RPC error and a result with `isError` are both a refusal. A server that exits, or does not answer within `--timeout`, is an error for that scenario.
+That first call is what makes a pass mean something. Most scenarios expect a refusal. A server that turned every call down, because it calls the argument `file_path` or takes only absolute paths, would pass them all.
 
-An MCP server receives a parsed call, so the `parse` scenarios are `not-covered`, and so is `stream-aborted`. The 17 `execute` scenarios run. SCOREBOARD.md has the reference filesystem server.
+A JSON-RPC error and a result with `isError` are both a refusal. The text of a refusal still counts: one that quotes a file from outside the workspace has leaked it. A server that exits, or does not answer within `--timeout`, is an error for that scenario.
+
+File text is read from `text` blocks, from embedded `resource` blocks, and from `structuredContent` when there is nothing else.
+
+An MCP server receives a parsed call, so the `parse` scenarios are `not-covered`, and so is `stream-aborted`. The other 17 `execute` scenarios run. SCOREBOARD.md has the reference filesystem server.
+
+`--timeout` is the limit for one request to the server, the start included. `npx -y` fetches the package on every start, and the server starts once per scenario. Install the server once and point the command at its file.
 
 ## Structured mode
 
@@ -176,7 +184,7 @@ The file holds `gauntletVersion`, `adapter`, and `scenarios`. Scenario ids are s
 
 A regression is `pass` or `not-covered` in the file and `fail` or `error` now. `fail` or `error` in the file and `pass` now is an improvement. A scenario this version runs that the file does not name is new. A new `fail` or `error` prints a warning. `--strict` counts it as a regression. A name in the file that this version does not run is ignored. The report lists regressions, improvements, and new scenarios, and says to rerun with `--update-baseline` when something improved. `--json` adds `baseline` with `regressions`, `improvements`, and `new`.
 
-`--baseline` and `--update-baseline` are mutually exclusive. A missing or invalid baseline file exits 2. `--update-baseline` records every scenario, so it exits 2 with `--scenario` or `--category`.
+`--baseline` and `--update-baseline` are mutually exclusive. A missing or invalid baseline file exits 2. `--update-baseline` records every scenario, so it exits 2 with `--scenario`, `--category`, or `--tier`.
 
 ## GitHub Action
 
@@ -269,8 +277,8 @@ oversized-argument           size        fail    wrote an oversized argument
 deep-nesting                 size        pass    returned for 2000 and 10000 levels of nesting
 
 5 passed, 23 failed, 0 errors, 0 not covered
-safety: 1 passed, 19 failed, 0 errors, 0 not covered
-robustness: 4 passed, 4 failed, 0 errors, 0 not covered
+safety: 1 passed, 20 failed, 0 errors, 0 not covered
+robustness: 4 passed, 3 failed, 0 errors, 0 not covered
 ```
 
 The five passes are earned. A parser that trims nothing cannot trim content, one that repairs nothing cannot get a repair wrong, `JSON.parse` does not recurse, and the naive adapter hands a failed tool back as its result.
@@ -305,7 +313,7 @@ The five passes are earned. A parser that trims nothing cannot trim content, one
 | path-unusable               | path       | robustness | execute | notes.txt/x and a 300-character name. The adapter must return, not crash.                                   |
 | stream-aborted              | stream     | safety     | execute | A complete write_file whose stream is already aborted.                                                      |
 | prompt-injection-result     | injection  | safety     | execute | A file read whose text contains a write_file call.                                                          |
-| oversized-argument          | size       | robustness | parse   | A write_file argument larger than 65536 bytes.                                                              |
+| oversized-argument          | size       | safety     | parse   | A write_file argument larger than 65536 bytes.                                                              |
 | deep-nesting                | size       | robustness | execute | An argument nested 2000 and 10000 arrays deep. The adapter must return, not crash.                          |
 
 `gauntlet show <id>` prints the payloads behind a row.
@@ -323,7 +331,7 @@ type Adapter = {
 };
 ```
 
-`AdapterRunInput` has `raw`, `sandboxDir`, and `aborted`. `RunOutput` is `executed`, `refused`, or `not-covered`.
+`AdapterRunInput` has `raw`, `sandboxDir`, and `aborted`, and `call` in a structured run. `RunOutput` is `executed`, `refused`, or `not-covered`. An adapter may have `close()`, which is called after each scenario and before its sandbox is deleted.
 
 ## Use it from code
 
@@ -338,7 +346,9 @@ for (const result of results) {
 }
 ```
 
-Each result has `id`, `title`, `category`, `status`, `reason`, and `probes`. `runScenario` runs one scenario. `asRunOutput` returns a `RunOutput` when a value is one, and `undefined` when it is not.
+Each result has `id`, `title`, `category`, `tier`, `status`, `reason`, and `probes`. `runScenario` runs one scenario. `asRunOutput` returns a `RunOutput` when a value is one, and `undefined` when it is not.
+
+`{ structured: true }` in the options hands each adapter a parsed `call`. `mcpAdapter(command, timeoutMs, name, toolNames)` returns an adapter for an MCP server, and its `check()` is the control call the CLI makes first. `formatSarif` writes the report `--sarif` writes.
 
 ## What the reference adapters are
 

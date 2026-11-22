@@ -83,7 +83,7 @@ test("the report counts each tier on its own line", async () => {
   const full = await run(["run", "--adapter", "reference-naive"]);
   const safety = scenarios.filter((item) => item.tier === "safety").length;
   expect(full.stdout).toContain(
-    `5 passed, 23 failed, 0 errors, 0 not covered\nsafety: 1 passed, ${safety - 1} failed, 0 errors, 0 not covered\nrobustness: 4 passed, 4 failed, 0 errors, 0 not covered\n`,
+    `5 passed, 23 failed, 0 errors, 0 not covered\nsafety: 1 passed, ${safety - 1} failed, 0 errors, 0 not covered\nrobustness: 4 passed, 3 failed, 0 errors, 0 not covered\n`,
   );
   const one = await run([
     "run",
@@ -117,7 +117,7 @@ test("--fail-on names the tier that decides the exit code", async () => {
     const any = await run(base);
     expect(any.code).toBe(1);
     expect(any.stdout).toContain(
-      "safety: 20 passed, 0 failed, 0 errors, 0 not covered\nrobustness: 7 passed, 1 failed, 0 errors, 0 not covered\n",
+      "safety: 21 passed, 0 failed, 0 errors, 0 not covered\nrobustness: 6 passed, 1 failed, 0 errors, 0 not covered\n",
     );
     expect((await run([...base, "--fail-on", "safety"])).code).toBe(0);
     expect((await run([...base, "--fail-on", "robustness"])).code).toBe(1);
@@ -154,6 +154,35 @@ test("--fail-on applies to a baseline regression too", async () => {
   });
 });
 
+test("filters that leave nothing to run, or nothing to decide, exit 2", async () => {
+  const base = ["run", "--adapter", "reference-naive"];
+  const empty = await run([
+    ...base,
+    "--scenario",
+    "path-escape",
+    "--tier",
+    "robustness",
+  ]);
+  expect(empty.code).toBe(2);
+  expect(empty.stdout).toBe("");
+  expect(empty.stderr).toBe(
+    "no scenario matches --scenario, --category, and --tier together\n",
+  );
+  const undecided = await run([
+    ...base,
+    "--tier",
+    "safety",
+    "--fail-on",
+    "robustness",
+  ]);
+  expect(undecided.code).toBe(2);
+  expect(undecided.stderr).toBe(
+    "--fail-on robustness cannot decide a run of --tier safety\n",
+  );
+  const same = await run([...base, "--tier", "safety", "--fail-on", "safety"]);
+  expect(same.code).toBe(1);
+});
+
 type Sarif = {
   version: string;
   runs: {
@@ -175,34 +204,43 @@ type Sarif = {
       kind: string;
       level: string;
       message: { text: string };
-      locations?: { physicalLocation: { artifactLocation: { uri: string } } }[];
+      locations: { physicalLocation: { artifactLocation: { uri: string } } }[];
     }[];
   }[];
 };
 
-test("--sarif writes one rule per scenario and one result per row", async () => {
+function readSarif(file: string): Sarif["runs"][number] {
+  const sarif = JSON.parse(readFileSync(file, "utf8")) as Sarif;
+  expect(sarif.version).toBe("2.1.0");
+  const sarifRun = sarif.runs[0];
+  if (!sarifRun) throw new Error("no run");
+  return sarifRun;
+}
+
+test("--sarif writes a rule per scenario and a result per failure", async () => {
   await withDir(async (dir) => {
     const file = path.join(dir, "gauntlet.sarif");
     const result = await run([
       "run",
       "--adapter",
       "reference-naive",
+      "--name",
+      "Agent One (tools)",
       "--sarif",
       file,
       "--sarif-location",
-      "src/agent/tools.ts",
+      "src/my agent/tools 100%.ts",
     ]);
     expect(result.code).toBe(1);
-    const sarif = JSON.parse(readFileSync(file, "utf8")) as Sarif;
-    expect(sarif.version).toBe("2.1.0");
-    const sarifRun = sarif.runs[0];
-    if (!sarifRun) throw new Error("no run");
+    const sarifRun = readSarif(file);
     expect(sarifRun.tool.driver.name).toBe("Gauntlet");
-    expect(sarifRun.automationDetails.id).toBe("gauntlet/reference-naive");
+    // The category is what comes before the last slash, one per target.
+    expect(sarifRun.automationDetails.id).toBe("gauntlet/agent-one-tools/");
     expect(sarifRun.tool.driver.rules.map((rule) => rule.id)).toEqual(
       scenarios.map((item) => item.id),
     );
-    expect(sarifRun.results).toHaveLength(scenarios.length);
+    // 23 of the 28 fail. A pass is not a finding.
+    expect(sarifRun.results).toHaveLength(23);
     const rule = (id: string) =>
       sarifRun.tool.driver.rules.find((item) => item.id === id);
     const row = (id: string) =>
@@ -219,26 +257,27 @@ test("--sarif writes one rule per scenario and one result per row", async () => 
       kind: "fail",
       level: "error",
       message: { text: "dotdot read a file outside the workspace" },
-      locations: [
-        {
-          physicalLocation: { artifactLocation: { uri: "src/agent/tools.ts" } },
-        },
-      ],
     });
     expect(row("trailing-comma-json")).toMatchObject({
       kind: "fail",
       level: "warning",
     });
-    const passed = row("deep-nesting");
-    expect(passed).toMatchObject({ kind: "pass", level: "none" });
-    expect(passed?.locations).toBeUndefined();
+    expect(row("deep-nesting")).toBeUndefined();
     for (const item of sarifRun.results) {
       expect(sarifRun.tool.driver.rules[item.ruleIndex]?.id).toBe(item.ruleId);
+      // A relative reference with each part encoded.
+      expect(item.locations).toEqual([
+        {
+          physicalLocation: {
+            artifactLocation: { uri: "src/my%20agent/tools%20100%25.ts" },
+          },
+        },
+      ]);
     }
   });
 });
 
-test("sarif maps an error and a not-covered row, and finds the adapter file", async () => {
+test("sarif maps an error, leaves out what did not fail, and finds the adapter file", async () => {
   await withDir(async (dir) => {
     const adapter = path.join(dir, "adapter.mjs");
     writeFileSync(
@@ -258,45 +297,68 @@ test("sarif maps an error and a not-covered row, and finds the adapter file", as
       "--sarif",
       file,
     ]);
-    const sarif = JSON.parse(readFileSync(file, "utf8")) as Sarif;
-    expect(sarif.runs[0]?.results).toMatchObject([
+    const sarifRun = readSarif(file);
+    expect(sarifRun.tool.driver.rules).toHaveLength(2);
+    expect(sarifRun.results).toMatchObject([
       {
         ruleId: "trailing-comma-json",
         kind: "fail",
         // An adapter that threw is an error whatever the tier.
         level: "error",
         message: { text: "The adapter did not return: boom" },
-        locations: [
-          { physicalLocation: { artifactLocation: { uri: adapter } } },
-        ],
       },
-      { ruleId: "stream-aborted", kind: "notApplicable", level: "none" },
     ]);
-    const built = await run([
+    // The adapter's own path, relative to where the run started and never
+    // absolute.
+    const uri =
+      sarifRun.results[0]?.locations[0]?.physicalLocation.artifactLocation
+        .uri ?? "";
+    expect(uri.startsWith("/")).toBe(false);
+    expect(uri.endsWith("/adapter.mjs")).toBe(true);
+    expect(uri).toBe(
+      path
+        .relative(process.cwd(), adapter)
+        .split(path.sep)
+        .map(encodeURIComponent)
+        .join("/"),
+    );
+    const clean = await run([
       "run",
       "--adapter",
-      "reference-naive",
-      "--scenario",
-      "path-escape",
+      "reference-hardened",
       "--sarif",
       file,
+      "--sarif-location",
+      "src/tools.ts",
     ]);
-    expect(built.code).toBe(1);
-    const named = JSON.parse(readFileSync(file, "utf8")) as Sarif;
-    expect(named.runs[0]?.results[0]?.locations).toBeUndefined();
+    expect(clean.code).toBe(0);
+    expect(readSarif(file).results).toEqual([]);
   });
-  const lonely = await run([
-    "run",
-    "--adapter",
-    "reference-naive",
-    "--sarif-location",
-    "x.ts",
-  ]);
-  expect(lonely.code).toBe(2);
-  expect(lonely.stderr).toBe("--sarif-location needs --sarif\n");
 });
 
-test("formatSarif skips a result whose scenario it does not know", () => {
+test("--sarif needs a file to point at", async () => {
+  const cases: [string[], string][] = [
+    [
+      ["--adapter", "reference-naive", "--sarif", "out.sarif"],
+      "--sarif needs --sarif-location <path>: the file a viewer opens for a failure\n",
+    ],
+    [
+      ["--exec", "true", "--sarif", "out.sarif"],
+      "--sarif needs --sarif-location <path>: the file a viewer opens for a failure\n",
+    ],
+    [
+      ["--adapter", "reference-naive", "--sarif-location", "x.ts"],
+      "--sarif-location needs --sarif\n",
+    ],
+  ];
+  for (const [argv, message] of cases) {
+    const result = await run(["run", ...argv]);
+    expect(result.code, argv.join(" ")).toBe(2);
+    expect(result.stderr).toBe(message);
+  }
+});
+
+test("formatSarif keeps a failure whose scenario it does not know", () => {
   const text = formatSarif(
     "a",
     "1.2.3",
@@ -310,6 +372,7 @@ test("formatSarif skips a result whose scenario it does not know", () => {
       },
     ],
     scenarios,
+    "a.ts",
   );
   const sarif = JSON.parse(text) as Sarif;
   expect(sarif.runs[0]?.tool.driver.rules).toEqual([]);
@@ -317,6 +380,7 @@ test("formatSarif skips a result whose scenario it does not know", () => {
     { ruleId: "future-case", kind: "fail", level: "error" },
   ]);
   expect(sarif.runs[0]?.results[0]).not.toHaveProperty("ruleIndex");
+  expect(sarif.runs[0]?.automationDetails.id).toBe("gauntlet/a/");
 });
 
 test("--structured with a module adapter hands over the call", async () => {

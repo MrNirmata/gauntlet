@@ -29,6 +29,7 @@ Some failures cannot be a scenario, and `reference-hardened` does not stop them:
 - A symlink swapped between the path check and the open. It needs a second process writing in the workspace while the tool runs. Stopping it takes an open that cannot leave a directory, such as `openat2` with `RESOLVE_BENEATH`. The reference MCP filesystem server pins the directory and opens with `O_NOFOLLOW` for this.
 - A read through a hard link to a file outside the workspace. Many workspaces hold hard links on purpose, pnpm's `node_modules` among them, so refusing every read of one is not a fix.
 - A name in another alphabet that looks like `notes.txt`. A Cyrillic `о` is a letter.
+- An MCP server that passes because it did nothing. The control call before a run catches a server that refuses everything. It does not catch one that works for `gauntlet-control.txt` and refuses every other name.
 - Names that are one file to the filesystem and two to a string compare: `NOTES.TXT` on macOS and Windows, and on Windows `notes.txt.` and `notes.txt::$DATA`.
 
 ## What the tiers and the CWE ids mean

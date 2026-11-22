@@ -6,9 +6,10 @@ import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { execAdapter, httpAdapter } from "./adapters/blackbox.ts";
 import { adapters } from "./adapters/index.ts";
-import { listMcpTools, mcpAdapter } from "./adapters/mcp.ts";
+import { mcpAdapter } from "./adapters/mcp.ts";
 import type { BaselineComparison, BaselineData } from "./baseline.ts";
 import { compareBaseline, readBaseline, writeBaseline } from "./baseline.ts";
+import { runCleanups } from "./cleanup.ts";
 import {
   formatDetails,
   formatJson,
@@ -141,13 +142,6 @@ export async function runCli(
     stderr.write(`${flags.error}\n`);
     return 2;
   }
-  if (flags.mode.kind === "mcp") {
-    const problem = await checkMcpServer(flags.mode.command, flags, stderr);
-    if (problem !== undefined) {
-      stderr.write(`${problem}\n`);
-      return 2;
-    }
-  }
   const adapter = await resolveRunAdapter(flags, stderr);
   if (!adapter) return 2;
   const selected = selectScenarios(
@@ -157,6 +151,12 @@ export async function runCli(
   );
   if ("error" in selected) {
     stderr.write(`${selected.error}\n`);
+    return 2;
+  }
+  if (selected.scenarios.length === 0) {
+    stderr.write(
+      "no scenario matches --scenario, --category, and --tier together\n",
+    );
     return 2;
   }
   let recorded: BaselineData | undefined;
@@ -216,7 +216,7 @@ export async function runCli(
         version,
         results,
         scenarios,
-        flags.sarifLocation ?? adapterFile(flags.mode),
+        flags.sarifLocation ?? adapterFile(flags.mode) ?? ".",
       ),
     );
     if (failure !== undefined) {
@@ -253,33 +253,6 @@ export async function runCli(
       (result.status === "fail" || result.status === "error"),
   );
   return bad ? 1 : 0;
-}
-
-// Starts the server once before the run. Returns what is wrong with it, or
-// undefined when at least one of the two tools is there.
-async function checkMcpServer(
-  command: string,
-  flags: RunFlags,
-  stderr: NodeJS.WritableStream,
-): Promise<string | undefined> {
-  let tools: string[];
-  try {
-    tools = await listMcpTools(command, flags.timeoutMs);
-  } catch (error) {
-    return `could not start the MCP server: ${errorLine(error)}`;
-  }
-  const read = flags.toolNames.get("read_file") ?? "read_file";
-  const write = flags.toolNames.get("write_file") ?? "write_file";
-  const missing = [read, write].filter((name) => !tools.includes(name));
-  if (missing.length === 0) return undefined;
-  const offered = tools.length > 0 ? tools.join(", ") : "none";
-  if (missing.length === 2) {
-    return `the MCP server has no tool named ${read} or ${write}. Its tools: ${offered}. Name the one that reads a file with --tool read_file=<name> and the one that writes with --tool write_file=<name>`;
-  }
-  stderr.write(
-    `note: the MCP server has no tool named ${missing[0]}. Its tools: ${offered}. Scenarios that need it are not covered\n`,
-  );
-  return undefined;
 }
 
 // The file a SARIF viewer should open for a failure, when the target is one.
@@ -510,6 +483,23 @@ function parseRunFlags(
   if (sarifLocation !== undefined && sarif === undefined) {
     return { error: "--sarif-location needs --sarif" };
   }
+  // The file is the only thing that ties a finding to a place a viewer can
+  // open. Without one, a code-scanning tool has nothing to show.
+  if (
+    sarif !== undefined &&
+    sarifLocation === undefined &&
+    !(adapter !== undefined && isAdapterPath(adapter))
+  ) {
+    return {
+      error:
+        "--sarif needs --sarif-location <path>: the file a viewer opens for a failure",
+    };
+  }
+  if (failOn !== "any" && tiers.length > 0 && !tiers.includes(failOn)) {
+    return {
+      error: `--fail-on ${failOn} cannot decide a run of --tier ${tiers.join(",")}`,
+    };
+  }
   if (baseline !== undefined && updateBaseline !== undefined) {
     return {
       error: "--baseline and --update-baseline are mutually exclusive",
@@ -583,13 +573,23 @@ async function resolveRunAdapter(
     );
   }
   if (flags.mode.kind === "mcp") {
-    return mcpAdapter(
+    const server = mcpAdapter(
       flags.mode.command,
       flags.timeoutMs,
       flags.name ?? `mcp:${flags.mode.command}`,
       flags.toolNames,
       flags.argumentNames,
     );
+    // One start before the run: list the tools, write a file, read it back.
+    // A server that cannot do that gets one message, not the same error on
+    // every row, and never a row of passes it did not earn.
+    const check = await server.check();
+    if (check.problem !== undefined) {
+      stderr.write(`${check.problem}\n`);
+      return undefined;
+    }
+    if (check.note !== undefined) stderr.write(`note: ${check.note}\n`);
+    return server;
   }
   const adapter = await resolveAdapter(flags.mode.spec, stderr);
   if (!adapter || flags.name === undefined) return adapter;
@@ -786,6 +786,16 @@ function flushed(stream: NodeJS.WritableStream): Promise<void> {
 }
 
 if (isDirectRun()) {
+  // An interrupt ends the run, and what the run started ends with it.
+  for (const [signal, code] of [
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ] as const) {
+    process.once(signal, () => {
+      runCleanups();
+      process.exit(code);
+    });
+  }
   const code = await runCli(
     process.argv.slice(2),
     process.stdout,

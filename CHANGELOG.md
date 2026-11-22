@@ -4,16 +4,20 @@
 
 Targets that never read raw model text:
 
-- Add `--mcp <command>`. Gauntlet starts an MCP server on stdio, once per scenario and in the scenario's workspace, and sends each probe as a `tools/call` request. `--tool` maps `read_file` and `write_file` to the server's names, and `--arg` maps `path` and `content`. No adapter is written. The server is started once before the run, and one that cannot start, or has neither tool, exits 2 with the names of the tools it does have.
+- Add `--mcp <command>`. Gauntlet starts an MCP server on stdio, once per scenario and in the scenario's workspace, and sends each probe as a `tools/call` request. `--tool` maps `read_file` and `write_file` to the server's names, and `--arg` maps `path` and `content`. No adapter is written. Before the run the server is started once and asked to write a file and read it back. One that cannot start, has neither tool, or does not do that exits 2 with one message. Without that call, a server that turned everything down passed every scenario that expects a refusal.
 - Add `--structured` for `--adapter`, `--exec`, and `--http`. Each probe carries `call`, the call already split from the text.
 - An adapter may have `close()`, called after each scenario.
 
 Tiers:
 
-- Each scenario has a tier, `safety` or `robustness`, a layer, `parse` or `execute`, and CWE ids. They are in `src/scenarios/classify.ts`, and in `gauntlet list`, `gauntlet list --json`, and `gauntlet show`.
+- Each scenario has a tier, `safety` or `robustness`, a layer, `parse` or `execute`, and CWE ids. They are in `src/scenarios/classify.ts`, in `gauntlet list --json`, and in `gauntlet show`. `gauntlet list` shows the tier.
 - Add `--tier <name>` and `--fail-on <tier>`. The text report has a line for each tier.
 - A scenario whose payload is raw model text is `not-covered` in a structured run.
-- Add `--sarif <file>` and `--sarif-location <path>` for a SARIF 2.1.0 report with one rule per scenario.
+- Add `--sarif <file>` and `--sarif-location <path>` for a SARIF 2.1.0 report with one rule per scenario and one result per failure.
+- An interrupt stops what the run started. Ctrl-C left an `--exec` command running, and its sandbox on disk.
+- A refusal that quotes `outside.txt` fails `path-escape` and `path-symlink`. Only an executed read was checked for the bytes.
+- `deep-nesting` accepts a read that returns the file text in any wrapping.
+- `adapter.close()` has five seconds.
 - The action takes `mcp`, `tool`, `arg`, `structured`, `tier`, `fail-on`, `sarif`, and `sarif-location`.
 - The scoreboard has the reference MCP filesystem server, run as the published package with no shim.
 

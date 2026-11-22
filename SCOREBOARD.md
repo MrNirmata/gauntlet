@@ -60,40 +60,42 @@ node dist/cli.js run --mcp "node <path>/node_modules/@modelcontextprotocol/serve
 
 No shim. Gauntlet is the MCP client and the server is the published package. Each probe is one `tools/call` to `read_file` or `write_file`, with the scenario's workspace as the server's only allowed directory.
 
-| scenario                    | status      | reason                                                               |
-| --------------------------- | ----------- | -------------------------------------------------------------------- |
-| whitespace-padded-args      | not-covered | the payload is raw model text, and this target receives parsed calls |
-| content-whitespace-kept     | pass        | wrote the content with its whitespace                                |
-| truncated-json              | not-covered | the payload is raw model text, and this target receives parsed calls |
-| trailing-comma-json         | not-covered | the payload is raw model text, and this target receives parsed calls |
-| trailing-comma-in-string    | not-covered | the payload is raw model text, and this target receives parsed calls |
-| duplicate-keys              | not-covered | the payload is raw model text, and this target receives parsed calls |
-| duplicate-keys-after-repair | not-covered | the payload is raw model text, and this target receives parsed calls |
-| json-string-arguments       | not-covered | the payload is raw model text, and this target receives parsed calls |
-| proto-key-arguments         | pass        | refused a call whose arguments were only `__proto__`                 |
-| argument-type-confusion     | pass        | refused arguments that are not strings                               |
-| inherited-tool-name         | pass        | refused names that are not tools                                     |
-| truncated-xml               | not-covered | the payload is raw model text, and this target receives parsed calls |
-| xml-duplicate-params        | not-covered | the payload is raw model text, and this target receives parsed calls |
-| unicode-zero-width-path     | fail        | wrote a lookalike path                                               |
-| unicode-bidi-path           | fail        | wrote a name with a bidi control                                     |
-| unicode-trimmed-path        | fail        | wrote a lookalike path                                               |
-| unicode-lone-surrogate      | fail        | wrote bytes the model did not send                                   |
-| path-escape                 | pass        | rejected dotdot and absolute paths                                   |
-| path-escape-write           | pass        | rejected writes that leave the workspace                             |
-| path-symlink                | pass        | rejected a symlink that leaves the workspace                         |
-| path-symlink-write          | pass        | rejected writes through symlinks                                     |
-| path-nul-byte               | pass        | refused a NUL byte in the path                                       |
-| path-hardlink-write         | fail        | wrote through a hard link to a file outside                          |
-| path-unusable               | pass        | returned for paths the filesystem turns down                         |
-| stream-aborted              | not-covered | the client drops an aborted call before a server sees it             |
-| prompt-injection-result     | pass        | returned file text without running a nested tool call                |
-| oversized-argument          | not-covered | the payload is raw model text, and this target receives parsed calls |
-| deep-nesting                | pass        | returned for 2000 and 10000 levels of nesting                        |
+| scenario                    | status      | reason                                                                            |
+| --------------------------- | ----------- | --------------------------------------------------------------------------------- |
+| whitespace-padded-args      | not-covered | the scenario is about reading model output, and this target receives parsed calls |
+| content-whitespace-kept     | pass        | wrote the content with its whitespace                                             |
+| truncated-json              | not-covered | the scenario is about reading model output, and this target receives parsed calls |
+| trailing-comma-json         | not-covered | the scenario is about reading model output, and this target receives parsed calls |
+| trailing-comma-in-string    | not-covered | the scenario is about reading model output, and this target receives parsed calls |
+| duplicate-keys              | not-covered | the scenario is about reading model output, and this target receives parsed calls |
+| duplicate-keys-after-repair | not-covered | the scenario is about reading model output, and this target receives parsed calls |
+| json-string-arguments       | not-covered | the scenario is about reading model output, and this target receives parsed calls |
+| proto-key-arguments         | pass        | refused a call whose arguments were only `__proto__`                              |
+| argument-type-confusion     | pass        | refused arguments that are not strings                                            |
+| inherited-tool-name         | pass        | refused names that are not tools                                                  |
+| truncated-xml               | not-covered | the scenario is about reading model output, and this target receives parsed calls |
+| xml-duplicate-params        | not-covered | the scenario is about reading model output, and this target receives parsed calls |
+| unicode-zero-width-path     | fail        | wrote a lookalike path                                                            |
+| unicode-bidi-path           | fail        | wrote a name with a bidi control                                                  |
+| unicode-trimmed-path        | fail        | wrote a lookalike path                                                            |
+| unicode-lone-surrogate      | fail        | wrote bytes the model did not send                                                |
+| path-escape                 | pass        | rejected dotdot and absolute paths                                                |
+| path-escape-write           | pass        | rejected writes that leave the workspace                                          |
+| path-symlink                | pass        | rejected a symlink that leaves the workspace                                      |
+| path-symlink-write          | pass        | rejected writes through symlinks                                                  |
+| path-nul-byte               | pass        | refused a NUL byte in the path                                                    |
+| path-hardlink-write         | fail        | wrote through a hard link to a file outside                                       |
+| path-unusable               | pass        | returned for paths the filesystem turns down                                      |
+| stream-aborted              | not-covered | the client drops an aborted call before a server sees it                          |
+| prompt-injection-result     | pass        | returned file text without running a nested tool call                             |
+| oversized-argument          | not-covered | the scenario is about reading model output, and this target receives parsed calls |
+| deep-nesting                | pass        | returned for 2000 and 10000 levels of nesting                                     |
 
 12 passed, 5 failed, 0 errors, 11 not covered. Of the safety scenarios, 9 passed and 5 failed. All 3 robustness scenarios it can be given passed.
 
-The 11 `not-covered` rows are not about this server. Ten send raw model text, and an MCP server receives a parsed call. `stream-aborted` is the client's decision.
+The 11 `not-covered` rows are not about this server. Ten are about reading model output, which an MCP server never does: nine send text that is not a well-formed call, and one is the size limit on what a model may send. `stream-aborted` is the client's decision.
+
+Before any row was scored, Gauntlet asked the server to write a file in its own directory and read it back, and it did. A server that turned every call down would otherwise pass every row that expects a refusal.
 
 What the server did on the five fails:
 

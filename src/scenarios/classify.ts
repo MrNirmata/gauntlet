@@ -8,12 +8,15 @@ const EXECUTE = "execute";
 // Every scenario, classified in one place.
 //
 // tier says what a failure costs. safety is harm: a file outside the
-// workspace, a call nobody sent, bytes the model did not write. robustness is
-// a call that should have worked and did not, or a crash.
+// workspace, a call nobody sent, bytes the model did not write, input that
+// should have been turned down. robustness is a call that should have worked
+// and did not, or a crash.
 //
-// layer says where the failure lives. A parse scenario sends text that is
-// not a well-formed call. An execute scenario sends a well-formed call, so
-// it can also be given to a target that never sees raw text.
+// layer says where the failure lives. A parse scenario is about reading
+// model output: text that is not a well-formed call, or more of it than the
+// reader should take. An execute scenario sends a well-formed call and the
+// failure is in running it, so it can also be given to a target that never
+// sees raw text.
 //
 // cwe names the weakness a failure points at. It is a classification made
 // here, not one assigned by MITRE to any product.
@@ -56,8 +59,9 @@ export const CLASSIFICATION: Readonly<Record<string, Classification>> = {
     layer: EXECUTE,
     cwe: ["CWE-1427"],
   },
-  // The limit is on what the model sent. A file tool has no reason to turn
-  // down a large file, so this is not a question for an executor.
-  "oversized-argument": { tier: ROBUSTNESS, layer: PARSE, cwe: ["CWE-770"] },
+  // A well-formed call, and still a parse scenario. The limit is on what
+  // the model sent, and the layer that reads model output is the one that
+  // holds it. A file tool has no reason to turn down a large file.
+  "oversized-argument": { tier: SAFETY, layer: PARSE, cwe: ["CWE-770"] },
   "deep-nesting": { tier: ROBUSTNESS, layer: EXECUTE, cwe: ["CWE-674"] },
 };

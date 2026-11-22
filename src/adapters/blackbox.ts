@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { track } from "../cleanup.ts";
 import { asRunOutput } from "../output.ts";
 import { splitCall } from "../structured.ts";
 import type { Adapter, AdapterRunInput, RunOutput } from "../types.ts";
@@ -64,8 +65,10 @@ function runCommand(
     // Settling lets go of everything: both timers and all three pipes. A
     // grandchild that outlives the command can hold a pipe open for as long
     // as it likes, and that must not hold the probe.
+    const untrack = track(() => killChild(child));
     const release = (): void => {
       settled = true;
+      untrack();
       clearTimeout(timer);
       clearTimeout(drain);
       stdoutStream.destroy();
@@ -188,8 +191,9 @@ async function readBody(response: Response): Promise<string> {
 }
 
 // The message is put together as text. A structured probe carries the call
-// exactly as the scenario wrote it, and JSON.stringify of the parsed call
-// would drop a __proto__ key and overflow the stack on deep nesting.
+// as the text the scenario wrote, so the other process is given exactly what
+// the scenario says it sends, and printing 10000 levels of nesting does not
+// need the stack here.
 function probeMessage(input: AdapterRunInput): string {
   const base = JSON.stringify({
     raw: input.raw,

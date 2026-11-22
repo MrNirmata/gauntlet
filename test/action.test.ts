@@ -354,8 +354,50 @@ test("mcp, tool, fail-on, and sarif are passed through", async () => {
     expect(result.outputs.get("pass")).toBe("1");
     const sarif = JSON.parse(
       readFileSync(path.join(dir, "gauntlet.sarif"), "utf8"),
-    ) as { runs: { automationDetails: { id: string }; results: unknown[] }[] };
-    expect(sarif.runs[0]?.automationDetails.id).toBe("gauntlet/naive-server");
-    expect(sarif.runs[0]?.results).toHaveLength(7);
+    ) as {
+      runs: {
+        automationDetails: { id: string };
+        results: {
+          locations: {
+            physicalLocation: { artifactLocation: { uri: string } };
+          }[];
+        }[];
+      }[];
+    };
+    expect(sarif.runs[0]?.automationDetails.id).toBe("gauntlet/naive-server/");
+    expect(sarif.runs[0]?.results).toHaveLength(6);
+    expect(
+      sarif.runs[0]?.results[0]?.locations[0]?.physicalLocation.artifactLocation
+        .uri,
+    ).toBe("server/index.ts");
   });
+});
+
+test("tier, structured, and a spaced tool list are passed through", () => {
+  const tiered = runAction({
+    INPUT_ADAPTER: "reference-hardened",
+    INPUT_TIER: "robustness",
+    INPUT_STRUCTURED: "true",
+  });
+  expect(tiered.code).toBe(0);
+  const robustness = scenarios.filter((item) => item.tier === "robustness");
+  expect(counted(tiered.outputs)).toBe(robustness.length);
+  // A structured run does not cover the parse scenarios.
+  expect(tiered.outputs.get("not-covered")).toBe(
+    String(robustness.filter((item) => item.layer === "parse").length),
+  );
+  const server = path.join(
+    process.cwd(),
+    "test",
+    "fixtures",
+    "mcp-reference.mjs",
+  );
+  const spaced = runAction({
+    INPUT_MCP: `"${process.execPath}" "${server}" hardened {workspace} renamed-args`,
+    INPUT_TOOL: "read_file=read_text_file, write_file=write_text_file",
+    INPUT_ARG: " path=file_path , content=text ",
+    INPUT_SCENARIO: "path-escape-write",
+  });
+  expect(spaced.code).toBe(0);
+  expect(spaced.outputs.get("pass")).toBe("1");
 });

@@ -1,6 +1,10 @@
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { Writable } from "node:stream";
 import { expect, test } from "vitest";
+import { mcpAdapter } from "../src/adapters/mcp.ts";
 import { runCli } from "../src/cli.ts";
 import { CLASSIFICATION } from "../src/scenarios/classify.ts";
 import { scenarios } from "../src/scenarios/index.ts";
@@ -93,7 +97,7 @@ test("a hardened MCP server passes every scenario it can be given", async () => 
   }
   const reasons = new Map(result.rows.map((row) => [row.id, row.reason]));
   expect(reasons.get("truncated-json")).toBe(
-    "the payload is raw model text, and this target receives parsed calls",
+    "the scenario is about reading model output, and this target receives parsed calls",
   );
   expect(reasons.get("stream-aborted")).toBe(
     "the client drops an aborted call before a server sees it",
@@ -171,6 +175,7 @@ test("--tool is checked before anything runs", async () => {
 
 test("a server that prints a banner and asks the client things still works", async () => {
   const result = await mcp(`${ODD} banner`, "--scenario", "deep-nesting");
+  expect(result.stderr).toBe("");
   expect(result.rows).toMatchObject([
     {
       status: "pass",
@@ -179,7 +184,7 @@ test("a server that prints a banner and asks the client things still works", asy
   ]);
 });
 
-test("a server that crashes, hangs, or does not start is an error", async () => {
+test("a server that crashes or hangs on a call is an error", async () => {
   const crash = await mcp(`${ODD} crash`, "--scenario", "deep-nesting");
   expect(crash.code).toBe(1);
   expect(crash.rows).toMatchObject([
@@ -195,31 +200,37 @@ test("a server that crashes, hangs, or does not start is an error", async () => 
     "--scenario",
     "deep-nesting",
     "--timeout",
-    "300",
+    "1500",
   );
-  expect(Date.now() - started).toBeLessThan(5000);
+  expect(Date.now() - started).toBeLessThan(8000);
   expect(hang.rows).toMatchObject([
-    { status: "error", reason: "mcp tools/call timed out after 300ms" },
+    { status: "error", reason: "mcp tools/call timed out after 1500ms" },
   ]);
 });
 
 test("a server that cannot start ends the run before it begins", async () => {
-  const missing = await mcp(`${ODD} no-start`, "--scenario", "path-escape");
-  expect(missing.code).toBe(2);
-  expect(missing.stdout).toBe("");
-  expect(missing.stderr).toBe(
-    "could not start the MCP server: mcp server exited 4: cannot open the allowed directory\n",
-  );
-  const gone = await mcp("exit 0");
-  expect(gone.code).toBe(2);
-  expect(gone.stderr).toBe(
-    "could not start the MCP server: mcp server exited 0\n",
-  );
-  const silent = await mcp("sleep 30", "--timeout", "300");
-  expect(silent.code).toBe(2);
-  expect(silent.stderr).toBe(
-    "could not start the MCP server: mcp initialize timed out after 300ms\n",
-  );
+  const cases: [string[], string][] = [
+    [
+      [`${ODD} no-start`, "--scenario", "path-escape"],
+      "could not start the MCP server: mcp server exited 4: cannot open the allowed directory",
+    ],
+    [["exit 0"], "could not start the MCP server: mcp server exited 0"],
+    [
+      ["sleep 30", "--timeout", "300"],
+      "could not start the MCP server: mcp initialize timed out after 300ms",
+    ],
+    [
+      [`${ODD} many-pages`],
+      "could not start the MCP server: mcp tools/list did not end after 20 pages",
+    ],
+  ];
+  for (const [argv, message] of cases) {
+    const [command = "", ...rest] = argv;
+    const result = await mcp(command, ...rest);
+    expect(result.code, command).toBe(2);
+    expect(result.stdout, command).toBe("");
+    expect(result.stderr, command).toBe(`${message}\n`);
+  }
 });
 
 test("a server whose tools have other names says so once", async () => {
@@ -251,6 +262,17 @@ test("a server whose tools have other names says so once", async () => {
   ]);
 });
 
+// The reason this check exists: every scenario below expects a refusal, and
+// a server that refuses everything would pass them all.
+test("a server that turns every call down is not scored", async () => {
+  const result = await mcp(`${ODD} refuse-all`, "--category", "path,unicode");
+  expect(result.code).toBe(2);
+  expect(result.stdout).toBe("");
+  expect(result.stderr).toBe(
+    "the MCP server did not write a file in its own directory with write_file: Invalid arguments: file_path is required. Gauntlet sends a path relative to the server's directory. Check --tool and --arg\n",
+  );
+});
+
 test("--arg renames the path and content arguments and nothing else", async () => {
   const server = `${REFERENCE} hardened {workspace} renamed-args`;
   const tools = [
@@ -274,17 +296,13 @@ test("--arg renames the path and content arguments and nothing else", async () =
       expect(row.status, `${row.id}: ${row.reason}`).toBe("pass");
     }
   }
-  // Without the map the server never sees a path. A scenario that needs the
-  // call to run then fails, and that is the sign the names are wrong.
-  const plain = await mcp(
-    server,
-    ...tools,
-    "--scenario",
-    "content-whitespace-kept",
+  // Without the map the server never sees a path, and the control call that
+  // comes before the run finds that out.
+  const plain = await mcp(server, ...tools, "--scenario", "path-escape");
+  expect(plain.code).toBe(2);
+  expect(plain.stderr).toBe(
+    "the MCP server did not write a file in its own directory with write_text_file: missing argument. Gauntlet sends a path relative to the server's directory. Check --tool and --arg\n",
   );
-  expect(plain.rows).toMatchObject([
-    { status: "fail", reason: "did not write padded.txt" },
-  ]);
   const cases: [string[], string][] = [
     [
       ["--mcp", "true", "--arg", "encoding=x"],
@@ -330,29 +348,71 @@ test("renameTopLevelKeys touches the outermost keys only", () => {
   expect(renameTopLevelKeys('{"path":"a"}', new Map())).toBe('{"path":"a"}');
 });
 
-test("a JSON-RPC error is a refusal, and its first line is the reason", async () => {
-  const result = await run([
-    "run",
-    "--mcp",
-    `${ODD} rpc-error`,
+test("an error reply is a refusal, with or without the id of the request", async () => {
+  for (const [mode, reason] of [
+    ["rpc-error", "Invalid arguments\nsecond line"],
+    ["null-id", "Parse error"],
+  ] as const) {
+    const result = await run([
+      "run",
+      "--mcp",
+      `${ODD} ${mode}`,
+      "--scenario",
+      "path-escape",
+      "--timeout",
+      "3000",
+      "--json",
+      "--verbose",
+    ]);
+    const report = JSON.parse(result.stdout) as {
+      scenarios: {
+        status: string;
+        tier: string;
+        probes: { outcome: unknown }[];
+      }[];
+    };
+    expect(report.scenarios[0]?.status, mode).toBe("pass");
+    expect(report.scenarios[0]?.tier).toBe("safety");
+    expect(report.scenarios[0]?.probes[0]?.outcome, mode).toEqual({
+      status: "refused",
+      reason,
+    });
+  }
+});
+
+test("a read that comes back inside an error has still leaked the file", async () => {
+  const result = await mcp(
+    `${ODD} leak`,
     "--scenario",
-    "path-escape",
-    "--json",
-    "--verbose",
+    "path-escape,path-symlink",
+  );
+  expect(result.code).toBe(1);
+  expect(result.rows).toMatchObject([
+    {
+      id: "path-escape",
+      status: "fail",
+      reason: "dotdot read a file outside the workspace",
+    },
+    {
+      id: "path-symlink",
+      status: "fail",
+      reason: "symlink read a file outside the workspace",
+    },
   ]);
-  const report = JSON.parse(result.stdout) as {
-    scenarios: {
-      status: string;
-      tier: string;
-      probes: { outcome: unknown }[];
-    }[];
-  };
-  expect(report.scenarios[0]?.status).toBe("pass");
-  expect(report.scenarios[0]?.tier).toBe("safety");
-  expect(report.scenarios[0]?.probes[0]?.outcome).toEqual({
-    status: "refused",
-    reason: "Invalid arguments",
-  });
+});
+
+test("file text is found however the server wraps it", async () => {
+  for (const mode of ["resource", "structured", "header"]) {
+    const result = await mcp(
+      `${ODD} ${mode}`,
+      "--scenario",
+      "prompt-injection-result,deep-nesting",
+    );
+    expect(result.rows, mode).toMatchObject([
+      { id: "prompt-injection-result", status: "pass" },
+      { id: "deep-nesting", status: "pass" },
+    ]);
+  }
 });
 
 test("tools are read across pages, and a missing one is not covered", async () => {
@@ -371,30 +431,81 @@ test("tools are read across pages, and a missing one is not covered", async () =
   ]);
 });
 
-test("no server is left running after a run", async () => {
-  await mcp(
-    `${ODD} hang`,
-    "--scenario",
-    "deep-nesting,path-escape",
-    "--timeout",
-    "300",
-  );
-  await mcp(`${REFERENCE} hardened {workspace}`, "--category", "unicode");
-  const alive = (): string[] =>
-    spawnSync("ps", ["-ax", "-o", "command="], { encoding: "utf8" })
-      .stdout.split("\n")
-      // A server, or the sh that started one. A search of every command
-      // line would also find a shell or an editor showing this file's text.
-      .filter(
-        (line) =>
-          /fixtures\/mcp-(odd|reference)\.mjs/.test(line) &&
-          (line.startsWith(process.execPath) || /^(\/bin\/)?sh -c /.test(line)),
-      );
-  const deadline = Date.now() + 3000;
-  while (alive().length > 0 && Date.now() < deadline) {
+// A server, or the sh that started one. A search of every command line
+// would also find a shell or an editor showing this file's text.
+function serversAlive(): string[] {
+  return spawnSync("ps", ["-ax", "-o", "command="], { encoding: "utf8" })
+    .stdout.split("\n")
+    .filter(
+      (line) =>
+        /fixtures\/mcp-(odd|reference)\.mjs/.test(line) &&
+        (line.startsWith(process.execPath) || /^(\/bin\/)?sh -c /.test(line)),
+    );
+}
+
+async function noServerLeft(): Promise<string[]> {
+  const deadline = Date.now() + 4000;
+  while (serversAlive().length > 0 && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  expect(alive()).toEqual([]);
+  return serversAlive();
+}
+
+test("no server is left running after a run", async () => {
+  // stubborn stays alive when its input closes and ignores SIGTERM, so it is
+  // only gone if its process group was killed.
+  const stubborn = await mcp(
+    `${ODD} stubborn`,
+    "--scenario",
+    "deep-nesting,path-unusable",
+  );
+  expect(stubborn.rows).toMatchObject([{ status: "pass" }, { status: "pass" }]);
+  await mcp(`${ODD} hang`, "--scenario", "deep-nesting", "--timeout", "1500");
+  await mcp(`${REFERENCE} hardened {workspace}`, "--category", "unicode");
+  expect(await noServerLeft()).toEqual([]);
+});
+
+test("a close during a call does not leave a server behind", async () => {
+  const slow = `sleep 0.6; exec ${ODD.replaceAll("{cwd}", process.cwd())} stubborn`;
+  const adapter = mcpAdapter(slow, 10_000, "slow", new Map());
+  const dir = mkdtempSync(path.join(os.tmpdir(), "gauntlet-test-"));
+  try {
+    const raw = '{"name":"read_file","arguments":{"path":"notes.txt"}}';
+    const call = splitCall(raw)?.call;
+    if (!call) throw new Error("no call");
+    const running = adapter.run({ raw, sandboxDir: dir, aborted: false, call });
+    const failed = running.then(
+      () => "returned",
+      (error: Error) => error.message,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await adapter.close?.();
+    await adapter.close?.();
+    expect(await failed).toBe("mcp adapter was closed during a call");
+    expect(await noServerLeft()).toEqual([]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a path with shell and replacement characters reaches the server whole", async () => {
+  const odd = mkdtempSync(path.join(os.tmpdir(), "gauntlet $& $' $$ it's "));
+  const before = process.cwd();
+  const fixture = path.join(before, "test", "fixtures", "mcp-odd.mjs");
+  try {
+    writeFileSync(path.join(odd, "server.mjs"), readFileSync(fixture));
+    process.chdir(odd);
+    const result = await mcp(
+      `"${process.execPath}" {cwd}/server.mjs banner`,
+      "--scenario",
+      "deep-nesting",
+    );
+    expect(result.stderr).toBe("");
+    expect(result.rows).toMatchObject([{ status: "pass" }]);
+  } finally {
+    process.chdir(before);
+    rmSync(odd, { recursive: true, force: true });
+  }
 });
 
 test("--structured gives a black-box adapter the call as it was written", async () => {

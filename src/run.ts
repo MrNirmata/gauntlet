@@ -1,3 +1,4 @@
+import { track } from "./cleanup.ts";
 import { asRunOutput } from "./output.ts";
 import { createSandbox, deleteSandbox } from "./sandbox.ts";
 import { splitCall } from "./structured.ts";
@@ -10,6 +11,8 @@ import type {
   RunOutput,
   Scenario,
 } from "./types.ts";
+
+const CLOSE_TIMEOUT_MS = 5000;
 
 export async function runScenario(
   adapter: Adapter,
@@ -31,10 +34,11 @@ export async function runScenario(
   if (options.structured === true && scenario.layer === "parse") {
     return finish(
       "not-covered",
-      "the payload is raw model text, and this target receives parsed calls",
+      "the scenario is about reading model output, and this target receives parsed calls",
     );
   }
   const sandbox = createSandbox();
+  const untrack = track(() => deleteSandbox(sandbox));
   try {
     scenario.prepare?.(sandbox);
     const outputs: RunOutput[] = [];
@@ -78,12 +82,15 @@ export async function runScenario(
   } catch (error) {
     return finish("error", errorMessage(error));
   } finally {
-    // The adapter lets go of the sandbox before the sandbox goes away.
+    // The adapter lets go of the sandbox before the sandbox goes away. It
+    // gets a limit, like every other call into an adapter.
     try {
-      await adapter.close?.();
+      const closing = adapter.close?.();
+      if (closing) await withTimeout(closing, CLOSE_TIMEOUT_MS);
     } catch {
-      // Stopping failed. The scenario's result stands.
+      // Stopping failed or never finished. The scenario's result stands.
     }
+    untrack();
     deleteSandbox(sandbox);
   }
 }
