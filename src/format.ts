@@ -82,7 +82,9 @@ export function formatDetails(
   const blocks: string[] = [];
   for (const result of results) {
     if (result.status === "pass") continue;
-    const lines = [`${result.id}  ${result.status}  ${result.reason}`];
+    const lines = [
+      `${result.id}  ${result.status}  ${printable(result.reason)}`,
+    ];
     const want = expected.get(result.id);
     if (want !== undefined) lines.push(`  expected: ${want}`);
     (result.probes ?? []).forEach((probe, index) => {
@@ -137,10 +139,10 @@ export function formatRun(
     result.id,
     result.category,
     result.status,
-    result.reason,
+    printable(result.reason),
   ]);
   const table = renderTable(rows, ["scenario", "category", "status", "reason"]);
-  const report = `adapter: ${adapterName}\n\n${table}\n\n${summaryLine(results)}\n`;
+  const report = `adapter: ${printable(adapterName)}\n\n${table}\n\n${summaryLine(results)}\n`;
   const extra = formatBaseline(baseline);
   return extra.length === 0 ? report : `${report}\n${extra}`;
 }
@@ -292,9 +294,9 @@ function showOutcome(outcome: ProbeRecord["outcome"]): string {
     const args = showRaw(
       JSON.stringify(clampDepth(outcome.call.arguments, MAX_PRINT_DEPTH)),
     );
-    return `executed ${outcome.call.name} ${args} => ${showRaw(outcome.result)}`;
+    return `executed ${printable(outcome.call.name)} ${args} => ${showRaw(outcome.result)}`;
   }
-  return `${outcome.status}: ${outcome.reason}`;
+  return `${outcome.status}: ${printable(outcome.reason)}`;
 }
 
 // Printable ASCII is shown as it is. Anything else becomes a JSON string
@@ -302,20 +304,28 @@ function showOutcome(outcome: ProbeRecord["outcome"]): string {
 // bytes were sent. A long payload is cut in the middle.
 function showRaw(raw: string, multiline = false): string {
   const plain = multiline ? /^[\x20-\x7e\n]*$/ : /^[\x20-\x7e]*$/;
-  const text = plain.test(raw)
-    ? raw
-    : JSON.stringify(raw).replace(
-        /[\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g,
-        (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
-      );
+  const text = plain.test(raw) ? raw : printable(JSON.stringify(raw));
   if (text.length <= RAW_LIMIT) return text;
   const bytes = Buffer.byteLength(raw);
   return `${text.slice(0, RAW_HEAD)} ... ${text.slice(-RAW_TAIL)} (${bytes} bytes)`;
 }
 
+// A reason, an adapter name, and a tool name come from the adapter. Printed
+// as they are, an escape sequence in one clears the screen, and a carriage
+// return or a line break draws a row that no scenario produced.
+const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+function printable(text: string): string {
+  return text.replace(UNPRINTABLE, (char) => {
+    const code = char.codePointAt(0) ?? 0;
+    const hex = code.toString(16);
+    return code > 0xffff ? `\\u{${hex}}` : `\\u${hex.padStart(4, "0")}`;
+  });
+}
+
 function xmlText(value: string): string {
   return value
-    .replace(/[^\t\n\r\u0020-\ud7ff\ue000-\ufffd]/g, "?")
+    .replace(/[^\t\n\r\u0020-\ud7ff\ue000-\ufffd\u{10000}-\u{10ffff}]/gu, "?")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")

@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -51,7 +52,7 @@ test("help and version exit 0 and write to stdout", async () => {
   }
   const version = await run(["--version"]);
   expect(version.code).toBe(0);
-  expect(version.stdout).toMatch(/^\d+\.\d+\.\d+\n$/);
+  expect(version.stdout).toMatch(/^\d+\.\d+\.\d+(-[a-z0-9.]+)?\n$/);
   const none = await run([]);
   expect(none.code).toBe(2);
   expect(none.stderr).toMatch(/^usage: gauntlet /);
@@ -80,7 +81,7 @@ test("show prints the payloads a scenario sends", async () => {
   const result = await run(["show", "path-symlink-write"]);
   expect(result.code).toBe(0);
   expect(result.stdout).toContain("id:        path-symlink-write");
-  expect(result.stdout).toContain("expected:  Refuses every write.");
+  expect(result.stdout).toContain("expected:  Refuses each write, or");
   expect(result.stdout).toContain("setup:     alias links to outside.txt");
   expect(result.stdout).toContain("probe 3:");
   expect(result.stdout).toContain(
@@ -99,7 +100,7 @@ test("show prints the payloads a scenario sends", async () => {
 test("show escapes invisible characters and cuts long payloads", async () => {
   const bidi = await run(["show", "unicode-bidi-path"]);
   expect(bidi.stdout).toContain("notes\\u202etxt.sh");
-  expect(bidi.stdout).not.toContain("‮");
+  expect(bidi.stdout).not.toContain("\u202e");
   const nul = await run(["show", "path-nul-byte"]);
   expect(nul.stdout).toContain("notes.txt\\u0000.md");
   const big = await run(["show", "oversized-argument"]);
@@ -234,6 +235,25 @@ test("verbose prints arguments nested deeper than the stack allows", async () =>
   expect(text).toContain("[nested too deep to print]");
 });
 
+test("a report larger than a pipe buffer arrives whole", () => {
+  const child = spawnSync(
+    process.execPath,
+    [
+      "dist/cli.js",
+      "run",
+      "--adapter",
+      "reference-naive",
+      "--json",
+      "--verbose",
+    ],
+    { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+  );
+  expect(child.status).toBe(1);
+  expect(child.stdout.length).toBeGreaterThan(100_000);
+  const report = JSON.parse(child.stdout) as { scenarios: unknown[] };
+  expect(report.scenarios).toHaveLength(scenarios.length);
+});
+
 test("junit writes one testcase per scenario", async () => {
   await withDir(async (dir) => {
     const file = path.join(dir, "gauntlet.xml");
@@ -247,7 +267,7 @@ test("junit writes one testcase per scenario", async () => {
     expect(result.code).toBe(1);
     const xml = readFileSync(file, "utf8");
     expect(xml).toContain(
-      `<testsuite name="reference-naive" tests="${scenarios.length}" failures="20" errors="0" skipped="0">`,
+      `<testsuite name="reference-naive" tests="${scenarios.length}" failures="23" errors="0" skipped="0">`,
     );
     expect(xml.match(/<testcase /g)).toHaveLength(scenarios.length);
     expect(xml).toContain(

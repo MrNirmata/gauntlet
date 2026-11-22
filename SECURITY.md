@@ -23,6 +23,13 @@ The payloads are the test. They contain path traversal, a NUL byte, bidi control
 
 A pass means the adapter handled the payloads in this suite. It is not a proof that the adapter is safe. `reference-hardened` passed all 12 scenarios of 0.1 and still had the holes listed in CHANGELOG.md.
 
+Some failures cannot be a scenario, and `reference-hardened` does not stop them:
+
+- A symlink swapped between the path check and the open. It needs a second process writing in the workspace while the tool runs. Stopping it takes an open that cannot leave a directory, such as `openat2` with `RESOLVE_BENEATH`.
+- A read through a hard link to a file outside the workspace. Many workspaces hold hard links on purpose, pnpm's `node_modules` among them, so refusing every read of one is not a fix.
+- A name in another alphabet that looks like `notes.txt`. A Cyrillic `о` is a letter.
+- Names that are one file to the filesystem and two to a string compare: `NOTES.TXT` on macOS and Windows, and on Windows `notes.txt.` and `notes.txt::$DATA`.
+
 ## Report a vulnerability
 
 Report a vulnerability in Gauntlet through a private advisory: https://github.com/MrNirmata/gauntlet/security/advisories/new

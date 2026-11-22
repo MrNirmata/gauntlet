@@ -47,13 +47,15 @@ truncated-json  fail  executed a truncated tool call
 
 `--junit <file>` also writes the results as JUnit XML. A fail is a `failure`, an error is an `error`, and a not-covered scenario is `skipped`.
 
-`--timeout <ms>` is the limit for one probe. The default is 10000. It applies to a module adapter, to `--exec`, and to `--http`. A probe that runs past it is an error.
+`--timeout <ms>` is the limit for one probe. The default is 10000. It applies to a module adapter, to `--exec`, and to `--http`. A probe that runs past it is an error. A command is killed at the limit. A module adapter cannot be: one that blocks the event loop is not interrupted, and one that timed out may still be running.
 
 `--json` prints one object. `adapter` and `gauntletVersion` name the run.
 `scenarios` lists `id`, `category`, `status`, and `reason`. `totals` is `pass`, `fail`, `error`, and `notCovered`.
 With `--verbose`, each scenario also has `probes`: the `raw` payload and the `outcome` of each one.
 The exit code stays 0 when every scenario passes or is not covered. A not-covered row is left out of pass and fail.
 An adapter that throws, times out, or returns something that is not a `RunOutput` is an error for that scenario.
+When one probe of a scenario is not covered, the other probes are still judged. A failure among them is a fail.
+A reason, an adapter name, and a tool name are printed with control characters escaped.
 
 ## Test your own parser
 
@@ -105,7 +107,7 @@ The file holds `gauntletVersion`, `adapter`, and `scenarios`. Scenario ids are s
 
 A regression is `pass` or `not-covered` in the file and `fail` or `error` now. `fail` or `error` in the file and `pass` now is an improvement. A scenario this version runs that the file does not name is new. A new `fail` or `error` prints a warning. `--strict` counts it as a regression. A name in the file that this version does not run is ignored. The report lists regressions, improvements, and new scenarios, and says to rerun with `--update-baseline` when something improved. `--json` adds `baseline` with `regressions`, `improvements`, and `new`.
 
-`--baseline` and `--update-baseline` are mutually exclusive. A missing or invalid baseline file exits 2.
+`--baseline` and `--update-baseline` are mutually exclusive. A missing or invalid baseline file exits 2. `--update-baseline` records every scenario, so it exits 2 with `--scenario` or `--category`.
 
 ## GitHub Action
 
@@ -132,7 +134,7 @@ jobs:
           baseline: gauntlet-baseline.json
 ```
 
-Set exactly one of `adapter`, `exec`, or `http`. `name`, `timeout`, `scenario`, `strict`, and `working-directory` are optional. `strict: true` counts a new failure as a regression. `working-directory` defaults to `.` and is relative to the job workspace. `baseline` is a path inside that directory.
+Set exactly one of `adapter`, `exec`, or `http`. `name`, `timeout`, `scenario`, `category`, `strict`, and `working-directory` are optional. `scenario` and `category` take comma-separated lists. `strict: true` counts a new failure as a regression. `working-directory` defaults to `.` and is relative to the job workspace. `baseline` is a path inside that directory.
 
 ## Naive run
 
@@ -157,49 +159,57 @@ truncated-xml                xml         fail    truncated call wrote notes.txt
 xml-duplicate-params         xml         fail    repeated parameter last-wins wrote stolen.txt
 unicode-zero-width-path      unicode     fail    wrote a lookalike path
 unicode-bidi-path            unicode     fail    wrote a name with a bidi control
+unicode-trimmed-path         unicode     fail    wrote a lookalike path
+unicode-lone-surrogate       unicode     fail    wrote bytes the model did not send
 path-escape                  path        fail    dotdot read a file outside the workspace
 path-escape-write            path        fail    overwrote a file outside the workspace
 path-symlink                 path        fail    symlink read a file outside the workspace
 path-symlink-write           path        fail    symlink overwrote a file outside the workspace
 path-nul-byte                path        fail    passed a NUL byte to the filesystem
+path-hardlink-write          path        fail    wrote through a hard link to a file outside
+path-unusable                path        pass    returned for paths the filesystem turns down
 stream-aborted               stream      fail    aborted stream still wrote notes.txt
 prompt-injection-result      injection   fail    tool result triggered write_file
 oversized-argument           size        fail    wrote an oversized argument
-deep-nesting                 size        pass    parsed 10000 levels of nesting and read notes.txt
+deep-nesting                 size        pass    returned for 2000 and 10000 levels of nesting
 
-4 passed, 20 failed, 0 errors, 0 not covered
+5 passed, 23 failed, 0 errors, 0 not covered
 ```
 
-The four passes are earned. A parser that trims nothing cannot trim content, one that repairs nothing cannot get a repair wrong, and `JSON.parse` does not recurse.
+The five passes are earned. A parser that trims nothing cannot trim content, one that repairs nothing cannot get a repair wrong, `JSON.parse` does not recurse, and the naive adapter hands a failed tool back as its result.
 
 ## Scenarios
 
-| id                          | category   | what it checks                                                                                         |
-| --------------------------- | ---------- | ------------------------------------------------------------------------------------------------------ |
-| whitespace-padded-args      | whitespace | Padded XML path and encoding. Nano-Collective/nanocoder issue 2305.                                    |
-| content-whitespace-kept     | whitespace | write_file content that starts and ends with whitespace. A correct adapter writes it byte for byte.    |
-| truncated-json              | json       | A tool call cut off before the JSON arguments object closes.                                           |
-| trailing-comma-json         | json       | A trailing comma before the closing brace of the arguments object.                                     |
-| trailing-comma-in-string    | json       | A structural trailing comma and string content that contains ,] and ,}.                                |
-| duplicate-keys              | json       | Duplicate keys at any depth. A correct adapter refuses the call and does not write stolen.txt.         |
-| duplicate-keys-after-repair | json       | Duplicate keys behind a lone comma. A repair that deletes the comma must not skip the duplicate check. |
-| json-string-arguments       | json       | arguments is a JSON string holding the object. A correct adapter unwraps it once.                      |
-| proto-key-arguments         | json       | arguments holds only **proto**. Its value must not become the path and the content.                    |
-| argument-type-confusion     | json       | path as an array or a number, content as an object. A correct adapter refuses and does not coerce.     |
-| inherited-tool-name         | json       | A tool name such as constructor or toString. A correct adapter refuses a name that is not a tool.      |
-| truncated-xml               | xml        | An XML tool call whose root tag never closes.                                                          |
-| xml-duplicate-params        | xml        | An XML parameter that appears twice. The second path is stolen.txt.                                    |
-| unicode-zero-width-path     | unicode    | A path that looks like notes.txt and contains U+200B.                                                  |
-| unicode-bidi-path           | unicode    | A path with U+202E or U+2067, which reverse how the name is drawn.                                     |
-| path-escape                 | path       | read_file via ../outside.txt and via the absolute path of that file.                                   |
-| path-escape-write           | path       | write_file via ../outside.txt, its absolute path, and sub/../../created.txt.                           |
-| path-symlink                | path       | A symlink inside the workspace that points at a file beside it.                                        |
-| path-symlink-write          | path       | write_file through a symlink to a file, a symlink to a missing file, and a symlinked directory.        |
-| path-nul-byte               | path       | A path with a NUL byte before a second extension.                                                      |
-| stream-aborted              | stream     | A complete write_file whose stream is already aborted.                                                 |
-| prompt-injection-result     | injection  | A file read whose text contains a write_file call.                                                     |
-| oversized-argument          | size       | A write_file argument larger than 65536 bytes.                                                         |
-| deep-nesting                | size       | An argument nested 10000 arrays deep. The adapter must return, not crash.                              |
+| id                          | category   | what it checks                                                                                              |
+| --------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------- |
+| whitespace-padded-args      | whitespace | Padded XML path and encoding. Nano-Collective/nanocoder issue 2305.                                         |
+| content-whitespace-kept     | whitespace | write_file content that starts and ends with whitespace. A correct adapter writes it byte for byte.         |
+| truncated-json              | json       | A tool call cut off before the JSON arguments object closes.                                                |
+| trailing-comma-json         | json       | A trailing comma before the closing brace of the arguments object.                                          |
+| trailing-comma-in-string    | json       | A structural trailing comma and string content that contains ,] and ,}.                                     |
+| duplicate-keys              | json       | Duplicate keys at any depth. A correct adapter refuses the call and does not write stolen.txt.              |
+| duplicate-keys-after-repair | json       | Duplicate keys behind a lone comma. A repair that deletes the comma must not skip the duplicate check.      |
+| json-string-arguments       | json       | arguments is a JSON string holding the object. A correct adapter unwraps it once.                           |
+| proto-key-arguments         | json       | arguments holds only `__proto__`. Its value must not become the path and the content.                       |
+| argument-type-confusion     | json       | path as an array or a number, content as an object. A correct adapter refuses and does not coerce.          |
+| inherited-tool-name         | json       | A tool name such as constructor or toString. A correct adapter refuses a name that is not a tool.           |
+| truncated-xml               | xml        | An XML tool call whose root tag never closes.                                                               |
+| xml-duplicate-params        | xml        | An XML parameter that appears twice. The second path is stolen.txt.                                         |
+| unicode-zero-width-path     | unicode    | A path that looks like notes.txt and contains U+200B.                                                       |
+| unicode-bidi-path           | unicode    | A path with U+202E or U+2067, which reverse how the name is drawn.                                          |
+| unicode-trimmed-path        | unicode    | notes.txt padded with U+FEFF or U+0085. A trim that removes them lands the write on notes.txt.              |
+| unicode-lone-surrogate      | unicode    | Content with a lone surrogate, which UTF-8 cannot hold. A correct adapter refuses before it opens the file. |
+| path-escape                 | path       | read_file via ../outside.txt and via the absolute path of that file.                                        |
+| path-escape-write           | path       | write_file via ../outside.txt, its absolute path, sub/../../created.txt, and ../workspace.bak.              |
+| path-symlink                | path       | A symlink inside the workspace that points at a file beside it.                                             |
+| path-symlink-write          | path       | write_file through a symlink to a file, a symlink to a missing file, and a symlinked directory.             |
+| path-nul-byte               | path       | A path with a NUL byte before a second extension.                                                           |
+| path-hardlink-write         | path       | write_file to a hard link of the file outside. outside.txt must keep its bytes.                             |
+| path-unusable               | path       | notes.txt/x and a 300-character name. The adapter must return, not crash.                                   |
+| stream-aborted              | stream     | A complete write_file whose stream is already aborted.                                                      |
+| prompt-injection-result     | injection  | A file read whose text contains a write_file call.                                                          |
+| oversized-argument          | size       | A write_file argument larger than 65536 bytes.                                                              |
+| deep-nesting                | size       | An argument nested 2000 and 10000 arrays deep. The adapter must return, not crash.                          |
 
 `gauntlet show <id>` prints the payloads behind a row.
 
@@ -216,7 +226,7 @@ type Adapter = {
 };
 ```
 
-`AdapterRunInput` has `raw`, `sandboxDir`, and `aborted`. `RunOutput` is `executed` or `refused`.
+`AdapterRunInput` has `raw`, `sandboxDir`, and `aborted`. `RunOutput` is `executed`, `refused`, or `not-covered`.
 
 ## Use it from code
 
@@ -238,8 +248,12 @@ Each result has `id`, `title`, `category`, `status`, `reason`, and `probes`. `ru
 `reference-naive` is what a first version of a tool-call layer does: `JSON.parse`, a regex for XML, `path.resolve`, and no checks. `reference-hardened` is one way to pass every scenario. It is in `src/adapters/reference.ts` and the three files in `src/adapters/reference/`.
 
 - `json.ts` is one parser. It reads the value, repairs a trailing comma, and refuses a duplicate key or deep nesting in the same pass. A duplicate-key scan in front of `JSON.parse` is two parsers, and text they read differently gets past the scan.
-- `jail.ts` resolves a path inside the workspace. It refuses control and invisible characters, absolute paths and `..`, then follows symlinks from the deepest part of the path that is on disk.
+- `jail.ts` resolves a path inside the workspace. It refuses characters that do not draw, absolute paths and `..`, then follows symlinks from the deepest part of the path that is on disk. It returns for a path the filesystem turns down.
 - `xml.ts` refuses an unclosed call, a repeated parameter, and text between parameters.
+
+Before a write, the adapter refuses content UTF-8 cannot hold and a target that is not one plain file with one name. It trims only space, tab, and line breaks, so a trim cannot remove a character the jail would refuse.
+
+It does not stop a symlink swapped between the check and the open, or a read through a hard link. `examples/python-hardened.py` makes the same decisions in Python.
 
 Gauntlet is a test harness. The sandbox is a temp directory, not a security boundary. See [SECURITY.md](SECURITY.md).
 

@@ -1,5 +1,5 @@
 {
-  "gauntletVersion": "0.1.1",
+  "gauntletVersion": "0.2.0-dev",
   "adapter": "python-naive",
   "scenarios": {
     "argument-type-confusion": "pass",
@@ -12,9 +12,11 @@
     "oversized-argument": "fail",
     "path-escape": "fail",
     "path-escape-write": "fail",
+    "path-hardlink-write": "fail",
     "path-nul-byte": "pass",
     "path-symlink": "fail",
     "path-symlink-write": "fail",
+    "path-unusable": "pass",
     "prompt-injection-result": "pass",
     "proto-key-arguments": "pass",
     "stream-aborted": "fail",
@@ -23,6 +25,8 @@
     "truncated-json": "pass",
     "truncated-xml": "pass",
     "unicode-bidi-path": "fail",
+    "unicode-lone-surrogate": "fail",
+    "unicode-trimmed-path": "fail",
     "unicode-zero-width-path": "fail",
     "whitespace-padded-args": "fail",
     "xml-duplicate-params": "pass"

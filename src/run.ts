@@ -46,7 +46,23 @@ export async function runScenario(
       outputs.push(output);
     }
     const uncovered = outputs.find((output) => output.status === "not-covered");
-    if (uncovered) return finish("not-covered", uncovered.reason);
+    if (uncovered) {
+      // One uncovered probe must not hide what the others did. Judge the
+      // rest as if the uncovered probes had refused. A failure stands, and a
+      // pass is still not-covered, because part of the scenario did not run.
+      if (outputs.some((output) => output.status !== "not-covered")) {
+        const check = scenario.expect({
+          outputs: outputs.map((output) =>
+            output.status === "not-covered"
+              ? { status: "refused", reason: output.reason }
+              : output,
+          ),
+          sandbox,
+        });
+        if (!check.ok) return finish("fail", check.reason);
+      }
+      return finish("not-covered", uncovered.reason);
+    }
     const check = scenario.expect({ outputs, sandbox });
     return finish(check.ok ? "pass" : "fail", check.reason);
   } catch (error) {
@@ -110,6 +126,6 @@ function errorMessage(error: unknown): string {
 }
 
 function oneLine(reason: string): string {
-  const line = reason.split("\n")[0];
+  const line = reason.split(/\r\n|\r|\n/)[0];
   return line !== undefined && line.length > 0 ? line : "unknown error";
 }

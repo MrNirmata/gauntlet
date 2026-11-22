@@ -26,7 +26,10 @@ inputs:
     required: false
     default: "false"
   scenario:
-    description: Run one scenario id instead of the full suite.
+    description: Scenario ids to run instead of the full suite, separated by commas.
+    required: false
+  category:
+    description: Categories to run instead of the full suite, separated by commas.
     required: false
   working-directory:
     description: Directory to run Gauntlet in. A relative path starts at the job workspace.
@@ -83,4 +86,5 @@ runs:
         INPUT_BASELINE: ${{ inputs.baseline }}
         INPUT_STRICT: ${{ inputs.strict }}
         INPUT_SCENARIO: ${{ inputs.scenario }}
+        INPUT_CATEGORY: ${{ inputs.category }}
       run: bash "$GITHUB_ACTION_PATH/scripts/action-run.sh"

@@ -1,7 +1,11 @@
+import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -305,10 +309,240 @@ test("reference-hardened reports a failed tool as its result", async () => {
   const output = await referenceHardened.run({
     raw: JSON.stringify({
       name: "write_file",
-      arguments: { path: "sub", content: "x" },
+      arguments: { path: "sub/missing/new.txt", content: "x" },
     }),
     sandboxDir: workspace,
     aborted: false,
   });
-  expect(output).toMatchObject({ status: "executed", result: "error: EISDIR" });
+  expect(output).toMatchObject({ status: "executed", result: "error: ENOENT" });
 });
+
+async function hardened(name: string, args: Record<string, unknown>) {
+  return referenceHardened.run({
+    raw: JSON.stringify({ name, arguments: args }),
+    sandboxDir: workspace,
+    aborted: false,
+  });
+}
+
+test("the jail returns for paths the filesystem turns down", async () => {
+  symlinkSync("loop", path.join(workspace, "loop"));
+  mkdirSync(path.join(workspace, "locked"), { mode: 0o000 });
+  try {
+    const cases: [string, string][] = [
+      ["notes.txt/x", "path goes through a file"],
+      ["loop/x", "dangling symlink rejected"],
+    ];
+    for (const [userPath, reason] of cases) {
+      expect(resolveInside(workspace, userPath), userPath).toEqual({
+        ok: false,
+        reason,
+      });
+    }
+    // Root is not stopped by a mode. The locked directory proves nothing then.
+    const unusable = ["a".repeat(300), `${"a/".repeat(2500)}a`];
+    if (process.getuid?.() !== 0) unusable.push("locked/x");
+    for (const userPath of unusable) {
+      expect(resolveInside(workspace, userPath).ok, userPath.slice(0, 20)).toBe(
+        true,
+      );
+      const read = await hardened("read_file", { path: userPath });
+      expect(read.status, userPath.slice(0, 20)).toBe("executed");
+      const write = await hardened("write_file", {
+        path: userPath,
+        content: "x",
+      });
+      expect(write, userPath.slice(0, 20)).toMatchObject({
+        status: "executed",
+        result: expect.stringMatching(/^error: E[A-Z]+$/),
+      });
+    }
+  } finally {
+    chmodSync(path.join(workspace, "locked"), 0o700);
+  }
+});
+
+test("only plain whitespace is trimmed from a path", async () => {
+  const padded = await hardened("read_file", { path: " \t notes.txt\r\n" });
+  expect(padded).toMatchObject({ status: "executed", result: "hello\n" });
+  for (const userPath of [
+    "\ufeffnotes.txt",
+    "notes.txt\ufeff",
+    "\u00a0notes.txt",
+    "notes.txt\u2028",
+    "notes.txt\u0085",
+    "notes.txt\u001f",
+  ]) {
+    const output = await hardened("write_file", {
+      path: userPath,
+      content: "x",
+    });
+    expect(output.status, JSON.stringify(userPath)).toBe("refused");
+  }
+  expect(readdirSync(workspace).sort()).toEqual(["notes.txt", "sub"]);
+  expect(readFileSync(path.join(workspace, "notes.txt"), "utf8")).toBe(
+    "hello\n",
+  );
+  const bom = await referenceHardened.run({
+    raw: "\ufeff<read_file><path>notes.txt</path></read_file>",
+    sandboxDir: workspace,
+    aborted: false,
+  });
+  expect(bom.status).toBe("refused");
+});
+
+test("the jail refuses characters that do not draw and accepts letters", () => {
+  const hidden = [
+    0x0085, 0x009b, 0x00a0, 0x034f, 0x115f, 0x17b5, 0x180b, 0x200c, 0x200d,
+    0x2028, 0x2029, 0x2800, 0x3000, 0x3164, 0xd800, 0xe000, 0xfe0f, 0xffa0,
+    0xfff9, 0xfffc, 0x1d173, 0xe0074, 0xe0100,
+  ];
+  for (const code of hidden) {
+    const userPath = `notes${String.fromCodePoint(code)}.txt`;
+    expect(
+      resolveInside(workspace, userPath).ok,
+      `U+${code.toString(16)}`,
+    ).toBe(false);
+  }
+  for (const userPath of [
+    "my notes.txt",
+    "caf\u00e9.txt",
+    "\u0444\u0430\u0439\u043b.txt",
+    "\u65e5\u672c\u8a9e.txt",
+    "\u{1f600}.txt",
+    "a-b_c.d~e (1) [2] {3} #4 @5 +6 =7 ,8 ;9 !0",
+  ]) {
+    expect(resolveInside(workspace, userPath).ok, userPath).toBe(true);
+  }
+});
+
+test("a write needs one plain file with one name", async () => {
+  linkSync(path.join(root, "outside.txt"), path.join(workspace, "twin.txt"));
+  expect(
+    await hardened("write_file", { path: "twin.txt", content: "x" }),
+  ).toEqual({
+    status: "refused",
+    reason: "write target has more than one hard link",
+  });
+  expect(readFileSync(path.join(root, "outside.txt"), "utf8")).toBe("secret\n");
+  expect(await hardened("write_file", { path: "sub", content: "x" })).toEqual({
+    status: "refused",
+    reason: "write target is not a regular file",
+  });
+  const fifo = spawnSync("mkfifo", [path.join(workspace, "pipe")]);
+  if (fifo.status === 0) {
+    const started = Date.now();
+    expect(
+      await hardened("write_file", { path: "pipe", content: "x" }),
+    ).toEqual({
+      status: "refused",
+      reason: "write target is not a regular file",
+    });
+    expect(Date.now() - started).toBeLessThan(2000);
+  }
+});
+
+test("content with a lone surrogate is refused before the file is opened", async () => {
+  const output = await referenceHardened.run({
+    raw: '{"name":"write_file","arguments":{"path":"notes.txt","content":"A\\ud800B"}}',
+    sandboxDir: workspace,
+    aborted: false,
+  });
+  expect(output).toEqual({
+    status: "refused",
+    reason: "content is not valid Unicode",
+  });
+  expect(readFileSync(path.join(workspace, "notes.txt"), "utf8")).toBe(
+    "hello\n",
+  );
+  const pair = await hardened("write_file", {
+    path: "notes.txt",
+    content: "\u{1f600}",
+  });
+  expect(pair.status).toBe("executed");
+});
+
+test("utf-8 is accepted however it is spelled", async () => {
+  for (const encoding of ["utf-8", "UTF-8", "utf8", " Utf8 "]) {
+    const output = await hardened("read_file", { path: "notes.txt", encoding });
+    expect(output.status, encoding).toBe("executed");
+  }
+  for (const encoding of ["latin1", "\ufeffutf-8", "utf-8\u001f", 8]) {
+    const output = await hardened("read_file", { path: "notes.txt", encoding });
+    expect(output.status, String(encoding)).toBe("refused");
+  }
+});
+
+const python3 = spawnSync("python3", ["--version"], { encoding: "utf8" });
+
+function pythonHardened(request: Record<string, unknown>) {
+  const child = spawnSync("python3", ["examples/python-hardened.py"], {
+    input: JSON.stringify({
+      sandboxDir: workspace,
+      aborted: false,
+      ...request,
+    }),
+    encoding: "utf8",
+    timeout: 20_000,
+  });
+  return {
+    code: child.status,
+    output: child.status === 0 ? (JSON.parse(child.stdout) as unknown) : null,
+    stderr: child.stderr,
+  };
+}
+
+test.skipIf(python3.status !== 0)(
+  "the python example refuses before it writes, and always replies",
+  () => {
+    const write = (extra: string) =>
+      `{"name":"write_file","arguments":{"path":"notes.txt","content":"OVERWRITTEN"${extra}}}`;
+    const deep = (levels: number) => "[".repeat(levels) + "]".repeat(levels);
+    const refusedRaw = [
+      write(`,"x":${deep(63)}`),
+      write(`,"x":${deep(1000)}`),
+      write(`,"x":${deep(5000)}`),
+      write(',"x":NaN'),
+      write(',"x":-Infinity'),
+      write(',"x":1e999'),
+      write(`,"x":${"9".repeat(5000)}`),
+      '{"name":"write_file","arguments":{"path":"notes.txt","content":"A\\ud800B"}}',
+      '{"name":"write_file","arguments":{"path":"a\\ud800.txt","content":"x"}}',
+      '{"name":"write_file","arguments":{"path":"notes.txt\\u0085","content":"x"}}',
+      '{"name":"write_file","arguments":{"path":"notes.txt/..namedfork/rsrc","content":"x"}}',
+      "\u001f<write_file><path>notes.txt</path><content>x</content></write_file>",
+    ];
+    for (const raw of refusedRaw) {
+      const reply = pythonHardened({ raw });
+      expect(reply.code, `${raw.slice(0, 90)} ${reply.stderr}`).toBe(0);
+      expect(reply.output, raw.slice(0, 90)).toMatchObject({
+        status: "refused",
+      });
+    }
+    for (const aborted of [true, 1, "true", null]) {
+      const reply = pythonHardened({ raw: write(""), aborted });
+      expect(reply.output, String(aborted)).toMatchObject({
+        status: "refused",
+      });
+    }
+    expect(readFileSync(path.join(workspace, "notes.txt"), "utf8")).toBe(
+      "hello\n",
+    );
+    expect(readdirSync(workspace).sort()).toEqual(["notes.txt", "sub"]);
+    writeFileSync(path.join(workspace, "mixed.txt"), "a\r\nb\rc");
+    expect(
+      pythonHardened({
+        raw: '{"name":"read_file","arguments":{"path":"mixed.txt","encoding":"UTF-8"}}',
+      }).output,
+    ).toMatchObject({ status: "executed", result: "a\r\nb\rc" });
+    writeFileSync(
+      path.join(workspace, "bin.dat"),
+      Buffer.from([0x41, 0xff, 0x42]),
+    );
+    expect(
+      pythonHardened({
+        raw: '{"name":"read_file","arguments":{"path":"bin.dat"}}',
+      }).output,
+    ).toMatchObject({ status: "executed", result: "A\ufffdB" });
+  },
+);

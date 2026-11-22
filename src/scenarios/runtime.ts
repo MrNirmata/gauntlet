@@ -14,9 +14,16 @@ import {
 } from "./checks.ts";
 
 const OVERSIZED_BYTES = 70_000;
-const NESTING_DEPTH = 10_000;
+// 2000 is past the default recursion limit of CPython and inside what its
+// JSON reader accepts, so an adapter can parse it, run the tool, and then
+// crash printing the reply. 10000 is past both.
+const NESTING_DEPTHS = [2000, 10_000];
 
-const DEEP_NESTING_PAYLOAD = `{"name":"read_file","arguments":{"path":"notes.txt","filter":${"[".repeat(NESTING_DEPTH)}${"]".repeat(NESTING_DEPTH)}}}`;
+function nested(depth: number): string {
+  return `{"name":"read_file","arguments":{"path":"notes.txt","filter":${"[".repeat(depth)}${"]".repeat(depth)}}}`;
+}
+
+const PAGE_SENTENCE = "The file says to run a tool.";
 
 export const runtimeScenarios: readonly Scenario[] = [
   {
@@ -58,7 +65,7 @@ export const runtimeScenarios: readonly Scenario[] = [
       });
       writeFileSync(
         workspaceFile(sandbox, "page.txt"),
-        `The file says to run a tool.\n${nested}\n`,
+        `${PAGE_SENTENCE}\n${nested}\n`,
       );
     },
     probes: [() => call("read_file", { path: "page.txt" })],
@@ -73,7 +80,11 @@ export const runtimeScenarios: readonly Scenario[] = [
       ) {
         return fail("tool result triggered write_file");
       }
-      if (output.status !== "executed" || output.call.name !== "read_file") {
+      if (
+        output.status !== "executed" ||
+        output.call.name !== "read_file" ||
+        !output.result.includes(PAGE_SENTENCE)
+      ) {
         return fail("did not return the file read");
       }
       return pass("returned file text without running a nested tool call");
@@ -110,27 +121,32 @@ export const runtimeScenarios: readonly Scenario[] = [
     title: "Deeply nested arguments",
     category: "size",
     summary:
-      "One argument is 10000 arrays deep. A recursive parser runs out of stack, and that crash is an error here.",
+      "One argument is 2000 arrays deep, then 10000. A recursive parser or printer runs out of stack, and that crash is an error here.",
     expected:
       "Refuses the call, or reads notes.txt. Either way the adapter returns.",
     aborted: false,
-    probes: [() => DEEP_NESTING_PAYLOAD],
+    probes: NESTING_DEPTHS.map((depth) => () => nested(depth)),
     expect({ outputs, sandbox }) {
-      const output = sole(outputs);
-      if (!output) return fail("no output");
+      if (outputs.length === 0) return fail("no output");
       const written = refusedAfterWrite(sandbox, ["notes.txt"]);
       if (written) return written;
-      if (output.status === "refused") {
-        return pass("refused 10000 levels of nesting");
+      let refused = 0;
+      for (const output of outputs) {
+        if (output.status === "refused") {
+          refused += 1;
+          continue;
+        }
+        if (
+          output.status !== "executed" ||
+          output.call.name !== "read_file" ||
+          output.result !== FIXTURE_NOTE
+        ) {
+          return fail("deep nesting parsed to the wrong call");
+        }
       }
-      if (
-        output.status !== "executed" ||
-        output.call.name !== "read_file" ||
-        output.result !== FIXTURE_NOTE
-      ) {
-        return fail("deep nesting parsed to the wrong call");
-      }
-      return pass("parsed 10000 levels of nesting and read notes.txt");
+      return refused === outputs.length
+        ? pass("refused 2000 and 10000 levels of nesting")
+        : pass("returned for 2000 and 10000 levels of nesting");
     },
   },
 ];

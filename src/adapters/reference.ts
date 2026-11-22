@@ -24,6 +24,9 @@ type Policy = {
   // also finds constructor and toString.
   ownToolNamesOnly: boolean;
   jailPaths: boolean;
+  // Refuse text UTF-8 cannot hold, and a write target that is not one plain
+  // file with one name.
+  guardWrites: boolean;
   honorAbort: boolean;
   executeToolCallFoundInResult: boolean;
   maxRawBytes: number | null;
@@ -40,6 +43,7 @@ const naivePolicy: Policy = {
   keepArgumentShape: false,
   ownToolNamesOnly: false,
   jailPaths: false,
+  guardWrites: false,
   honorAbort: false,
   executeToolCallFoundInResult: true,
   maxRawBytes: null,
@@ -54,6 +58,7 @@ const hardenedPolicy: Policy = {
   keepArgumentShape: true,
   ownToolNamesOnly: true,
   jailPaths: true,
+  guardWrites: true,
   honorAbort: true,
   executeToolCallFoundInResult: false,
   maxRawBytes: MAX_RAW_BYTES,
@@ -105,7 +110,7 @@ function executePayload(
       reason: `argument exceeds ${policy.maxRawBytes} bytes`,
     };
   }
-  const parsed = raw.trimStart().startsWith("<")
+  const parsed = raw.replace(LEADING_SPACE, "").startsWith("<")
     ? parseXmlCall(raw, { strict: policy.strictXml })
     : parseJson(raw, policy);
   if (!parsed.ok) return { status: "refused", reason: parsed.reason };
@@ -130,7 +135,7 @@ function applyTrim(call: ToolCall, policy: Policy): ToolCall {
     setOwn(
       args,
       key,
-      identifier && typeof value === "string" ? value.trim() : value,
+      identifier && typeof value === "string" ? trimSpace(value) : value,
     );
   }
   return { name: call.name, arguments: args };
@@ -304,7 +309,7 @@ function executeCall(
   const encoding = call.arguments.encoding;
   if (
     encoding !== undefined &&
-    (typeof encoding !== "string" || encoding.trim() !== "utf-8")
+    (typeof encoding !== "string" || !isUtf8(trimSpace(encoding)))
   ) {
     return { status: "refused", reason: "encoding not allowed" };
   }
@@ -313,6 +318,10 @@ function executeCall(
     const jailed = resolveInside(sandboxDir, userPath);
     if (!jailed.ok) return { status: "refused", reason: jailed.reason };
     resolved = jailed.path;
+  }
+  if (policy.guardWrites && call.name === "write_file") {
+    const reason = writeGuard(resolved, content ?? "");
+    if (reason !== undefined) return { status: "refused", reason };
   }
   // A tool that fails hands the failure back as its result, the way an agent
   // loop reports a tool error to the model. The loop also turns whatever the
@@ -326,6 +335,39 @@ function executeCall(
   } catch (error) {
     return { status: "executed", call, result: `error: ${errorCode(error)}` };
   }
+}
+
+// A lone surrogate has no UTF-8 form. Node writes U+FFFD in its place, so the
+// file would hold bytes the model did not send. Opening a FIFO for writing
+// blocks until something reads it. A file with a second hard link may be the
+// same file as one outside the workspace.
+function writeGuard(target: string, content: string): string | undefined {
+  if (/\p{Cs}/u.test(content)) return "content is not valid Unicode";
+  let stat: ReturnType<typeof statSync> | undefined;
+  try {
+    stat = statSync(target, { throwIfNoEntry: false });
+  } catch {
+    return undefined;
+  }
+  if (stat === undefined) return undefined;
+  if (!stat.isFile()) return "write target is not a regular file";
+  if (stat.nlink > 1) return "write target has more than one hard link";
+  return undefined;
+}
+
+// JavaScript trim() also removes U+FEFF, the no-break space, and the line
+// separators. Trimming those turns a path the jail would refuse into one it
+// accepts. Only the four JSON whitespace characters are padding.
+const LEADING_SPACE = /^[ \t\r\n]+/;
+const TRAILING_SPACE = /[ \t\r\n]+$/;
+
+function trimSpace(value: string): string {
+  return value.replace(LEADING_SPACE, "").replace(TRAILING_SPACE, "");
+}
+
+function isUtf8(encoding: string): boolean {
+  const name = encoding.toLowerCase();
+  return name === "utf-8" || name === "utf8";
 }
 
 // The tools take strings. Coercing anything else to a string turns

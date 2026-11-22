@@ -153,6 +153,44 @@ function execute(
         "size check is in executeWriteFile, which this shim does not call",
     };
   }
-  writeFileSync(resolved, args.content, "utf8");
+  // How the bytes reach the disk is also executeWriteFile's decision: what it
+  // does with text UTF-8 cannot hold, and whether it writes in place or
+  // replaces the file. A plain writeFileSync here would measure Node.
+  if (/\p{Cs}/u.test(args.content) || hasSecondLink(resolved)) {
+    return {
+      status: "not-covered",
+      reason: "the write is in executeWriteFile, which this shim does not call",
+    };
+  }
+  try {
+    writeFileSync(resolved, args.content, "utf8");
+  } catch (error) {
+    return {
+      status: "executed",
+      call: toolCall,
+      result: `error: ${errorCode(error)}`,
+    };
+  }
   return { status: "executed", call: toolCall, result: "wrote" };
+}
+
+function hasSecondLink(file: string): boolean {
+  try {
+    const stat = statSync(file, { throwIfNoEntry: false });
+    return stat !== undefined && stat.nlink > 1;
+  } catch {
+    return false;
+  }
+}
+
+function errorCode(error: unknown): string {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+  ) {
+    return error.code;
+  }
+  return "failed";
 }

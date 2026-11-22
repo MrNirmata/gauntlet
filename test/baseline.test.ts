@@ -18,9 +18,11 @@ const NAIVE_STATUS = {
   "oversized-argument": "fail",
   "path-escape": "fail",
   "path-escape-write": "fail",
+  "path-hardlink-write": "fail",
   "path-nul-byte": "fail",
   "path-symlink": "fail",
   "path-symlink-write": "fail",
+  "path-unusable": "pass",
   "prompt-injection-result": "fail",
   "proto-key-arguments": "fail",
   "stream-aborted": "fail",
@@ -29,6 +31,8 @@ const NAIVE_STATUS = {
   "truncated-json": "fail",
   "truncated-xml": "fail",
   "unicode-bidi-path": "fail",
+  "unicode-lone-surrogate": "fail",
+  "unicode-trimmed-path": "fail",
   "unicode-zero-width-path": "fail",
   "whitespace-padded-args": "fail",
   "xml-duplicate-params": "fail",
@@ -47,7 +51,7 @@ test("update-baseline writes the reference-naive results", async () => {
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain(
-      "4 passed, 20 failed, 0 errors, 0 not covered",
+      "5 passed, 23 failed, 0 errors, 0 not covered",
     );
     expect(Object.keys(NAIVE_STATUS).sort()).toEqual(
       scenarios.map((scenario) => scenario.id).sort(),
@@ -361,8 +365,6 @@ test("update-baseline exits 2 when the file cannot be written", async () => {
       "run",
       "--adapter",
       "reference-naive",
-      "--scenario",
-      "truncated-json",
       "--update-baseline",
       dir,
     ]);

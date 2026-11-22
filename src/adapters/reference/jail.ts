@@ -1,18 +1,38 @@
-import { lstatSync, realpathSync } from "node:fs";
+import { lstatSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
 export type Jailed = { ok: true; path: string } | { ok: false; reason: string };
 
-// Characters that change how a path reads without changing how it looks:
-// zero-width and joiner characters, bidi marks, embeddings, overrides and
-// isolates, invisible operators, and the soft hyphen.
-const INVISIBLE = new Set([
-  0x00ad, 0x061c, 0x180e, 0x200b, 0x200c, 0x200d, 0x200e, 0x200f, 0x202a,
-  0x202b, 0x202c, 0x202d, 0x202e, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064,
-  0x2066, 0x2067, 0x2068, 0x2069, 0x206a, 0x206b, 0x206c, 0x206d, 0x206e,
-  0x206f, 0xfeff,
-]);
+// Characters that change how a path reads without changing how it looks, or
+// that a terminal acts on. Every "other" category: controls, format
+// characters such as zero-width and bidi marks, lone surrogates, private use,
+// and unassigned. Every separator that is not the plain space.
+const HIDDEN = /[\p{C}\p{Zl}\p{Zp}]|[^\P{Zs} ]/u;
 
+// Letters and marks that draw as nothing: fillers, variation selectors, the
+// combining grapheme joiner, the braille blank, the object replacement.
+const BLANK: readonly (readonly [number, number])[] = [
+  [0x034f, 0x034f],
+  [0x115f, 0x1160],
+  [0x17b4, 0x17b5],
+  [0x180b, 0x180f],
+  [0x2800, 0x2800],
+  [0x3164, 0x3164],
+  [0xfe00, 0xfe0f],
+  [0xffa0, 0xffa0],
+  [0xfffc, 0xfffc],
+  [0xe0100, 0xe01ef],
+];
+
+// The list errs toward refusing. A name with an emoji joiner or a Persian
+// zero-width non-joiner is refused. A lookalike letter is not: a Cyrillic o
+// is a letter, and no list of characters can tell which alphabet was meant.
+//
+// What this jail does not stop:
+// - A symlink swapped between the check here and the open that follows. Node
+//   cannot open a path beneath a directory in one step.
+// - A read through a hard link to a file outside. That file is inside by
+//   every test a path can pass.
 export function resolveInside(workspace: string, userPath: string): Jailed {
   if (userPath.length === 0) return refuse("empty path");
   const odd = oddCharacter(userPath);
@@ -35,29 +55,59 @@ export function resolveInside(workspace: string, userPath: string): Jailed {
     anchor = parent;
   }
   let realAnchor: string;
+  let realWorkspace: string;
   try {
     realAnchor = realpathSync(anchor);
   } catch {
     return refuse("dangling symlink rejected");
   }
-  if (isOutside(realpathSync(workspace), realAnchor)) {
+  try {
+    realWorkspace = realpathSync(workspace);
+  } catch {
+    return refuse("workspace not found");
+  }
+  if (isOutside(realWorkspace, realAnchor)) {
     return refuse("symlink escapes workspace");
+  }
+  // notes.txt/x: the part that is on disk is a file, and the rest of the path
+  // would have to be inside it. On macOS such a path can name a resource fork.
+  if (anchor !== resolved && !isDirectory(realAnchor)) {
+    return refuse("path goes through a file");
   }
   return { ok: true, path: resolved };
 }
 
 function oddCharacter(value: string): string | undefined {
+  let invisible = HIDDEN.test(value);
   for (const char of value) {
-    const code = char.codePointAt(0);
-    if (code === undefined) continue;
-    if (code < 0x20 || code === 0x7f) return "path contains control characters";
-    if (INVISIBLE.has(code)) return "path contains invisible characters";
+    const code = char.codePointAt(0) ?? 0;
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) {
+      return "path contains control characters";
+    }
+    if (BLANK.some(([first, last]) => code >= first && code <= last)) {
+      invisible = true;
+    }
   }
-  return undefined;
+  return invisible ? "path contains invisible characters" : undefined;
 }
 
+// lstat reports more than a missing entry: a file used as a directory, a
+// name too long, a link loop, no permission. None of those is on disk as far
+// as this walk is concerned, and none of them may throw out of the adapter.
 function onDisk(target: string): boolean {
-  return lstatSync(target, { throwIfNoEntry: false }) !== undefined;
+  try {
+    return lstatSync(target, { throwIfNoEntry: false }) !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+function isDirectory(target: string): boolean {
+  try {
+    return statSync(target).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function isOutside(root: string, target: string): boolean {

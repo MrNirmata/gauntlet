@@ -102,7 +102,9 @@ function cell(value: string): string {
     .replaceAll("\n", " ")
     .replaceAll("\r", " ")
     .replaceAll("|", "\\|")
-    .replaceAll("`", "'");
+    .replaceAll("`", "'")
+    .replaceAll("_", "\\_")
+    .replaceAll("*", "\\*");
 }
 
 function parseReport(json: unknown): Report {

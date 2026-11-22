@@ -196,7 +196,7 @@ export const jsonScenarios: readonly Scenario[] = [
         return fail("duplicate key last-wins wrote stolen.txt");
       }
       if (readNote(sandbox) !== FIXTURE_NOTE)
-        return fail("duplicate key last-wins wrote stolen.txt");
+        return fail("duplicate key first-wins wrote notes.txt");
       for (const output of outputs) {
         if (output.status !== "refused") return fail("accepted duplicate keys");
       }

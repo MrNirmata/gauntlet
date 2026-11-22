@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-New scenarios. The suite goes from 12 to 24. A baseline recorded before this lists them as new. They do not fail a `--baseline` run unless `--strict` is set.
+New scenarios. The suite goes from 12 to 28. A baseline recorded before this lists them as new. They do not fail a `--baseline` run unless `--strict` is set.
 
 - content-whitespace-kept
 - duplicate-keys-after-repair
@@ -12,9 +12,13 @@ New scenarios. The suite goes from 12 to 24. A baseline recorded before this lis
 - truncated-xml
 - xml-duplicate-params
 - unicode-bidi-path
+- unicode-trimmed-path
+- unicode-lone-surrogate
 - path-escape-write
 - path-symlink-write
 - path-nul-byte
+- path-hardlink-write
+- path-unusable
 - deep-nesting
 
 Fixes in `reference-hardened`. Each was a way through an adapter that passed all 12 scenarios.
@@ -23,7 +27,13 @@ Fixes in `reference-hardened`. Each was a way through an adapter that passed all
 - Refuse a write through a symlink whose target does not exist. The write created the file outside the workspace.
 - Refuse deep nesting. 20000 nested arrays overflowed the stack of the duplicate-key scan and the adapter threw.
 - Refuse a path with a control character. A NUL byte reached `fs` and the adapter threw.
-- Refuse the soft hyphen, bidi marks, and invisible operators in a path, not only the zero-width characters.
+- Refuse every control, format, private-use, and unassigned character in a path, every space that is not U+0020, and the blank fillers and variation selectors. The list was 14 code points.
+- Trim only space, tab, and line breaks. `trim()` removed U+FEFF before the path check, so a path of U+FEFF and `notes.txt` read `notes.txt`.
+- Return for a path the filesystem turns down. `notes.txt/x`, a 300-character name, a link loop, and a directory without permission made the jail throw.
+- Refuse a path that goes through a file.
+- Refuse content with a lone surrogate. Node wrote U+FFFD in its place.
+- Refuse a write to a FIFO, a directory, or a file with a second hard link.
+- Accept `UTF-8` and `utf8` as the encoding.
 - Refuse an XML call with a repeated parameter or text between parameters.
 - Report a failed read or write as the tool result. The adapter does not throw.
 
@@ -39,11 +49,34 @@ Runner and CLI:
 - Stop reading `--exec` and `--http` output at 4 MiB.
 - Copy `call.arguments` as own properties. A `__proto__` key in an adapter's reply no longer becomes the prototype of the copy.
 - `Scenario` has a required `expected` line and an optional `setup` line. `Result` has `probes`.
+- Settle an `--exec` probe at the limit. It waited for the pipes to close, so a grandchild holding stdout held the probe for as long as it lived.
+- Keep running when a sandbox cannot be deleted. A directory an adapter left without permissions ended the run with a stack trace and no report.
+- Judge the other probes when one is not covered. A write outside the workspace on one probe was hidden by a `not-covered` on the next.
+- Exit 2 for `--update-baseline` with `--scenario` or `--category`. It replaced the whole baseline with the filtered run.
+- Exit 2 for an empty `--scenario` or `--category`, a `--timeout` above 2147483647, and an `--http` value that is not an http or https URL.
+- Escape control characters in a reason, an adapter name, and a tool name. An adapter could clear the screen or draw a row.
+- Flush stdout before exit. A `--json` report over 64 KiB was cut when stdout was a pipe.
+- Escape `_` and `*` in the job summary, so `__proto__` is not bold.
+- Build on `prepare`, so an install from git has `dist`.
+- The action takes `category`. `scenario` takes a list.
+
+Scenario checks that were too loose or too tight:
+
+- `path-escape-write` also writes `../workspace.bak`. A jail that compares path prefixes without a separator passed every path scenario.
+- `prompt-injection-result` requires the text of the file in the result. An empty result passed.
+- `path-symlink-write` accepts an adapter that replaces the link with a new file. It only accepted a refusal.
+- `duplicate-keys` names first-wins when `notes.txt` is what changed.
+
+The version is `0.2.0-dev` until the release. `gauntletVersion` in a report and in a baseline no longer says 0.1.1 for a build with 28 scenarios.
 
 Examples:
 
 - Add `examples/python-hardened.py`, which passes every scenario from Python.
 - `examples/python-adapter.py` refuses a NUL byte and deep nesting. It exited 1 with a traceback on both.
+
+A second pass reviewed the runner, the CLI, the scenario checks, and the tests. The runner and CLI fixes from the exec limit down, and the four scenario checks above, came from it.
+
+An independent pass attacked both hardened adapters after the first 22 scenarios. It found no way out of the workspace without a race or a hard link, and no text the strict parser and `JSON.parse` read differently. The fixes above from U+FEFF down, the four scenarios `unicode-trimmed-path`, `unicode-lone-surrogate`, `path-hardlink-write`, and `path-unusable`, and the second depth in `deep-nesting` came from it.
 
 Earlier in this release:
 

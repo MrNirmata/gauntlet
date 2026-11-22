@@ -19,15 +19,15 @@ const execNaive = path.resolve("test/fixtures/exec-naive.mjs");
 test("reference-naive without a baseline fails the step", () => {
   const result = runAction({ INPUT_ADAPTER: "reference-naive" });
   expect(result.code).toBe(1);
-  expect(result.outputs.get("pass")).toBe("4");
-  expect(result.outputs.get("fail")).toBe("20");
+  expect(result.outputs.get("pass")).toBe("5");
+  expect(result.outputs.get("fail")).toBe("23");
   expect(result.outputs.get("error")).toBe("0");
   expect(result.outputs.get("not-covered")).toBe("0");
   expect(result.outputs.get("regressions")).toBe("");
   expect(counted(result.outputs)).toBe(scenarios.length);
   expect(result.summary).toContain("| scenario | category | status | reason |");
   expect(result.summary).toContain(
-    "4 passed, 20 failed, 0 errors, 0 not covered",
+    "5 passed, 23 failed, 0 errors, 0 not covered",
   );
   expect(result.summary).not.toContain("### Baseline");
   for (const scenario of scenarios) {
@@ -51,8 +51,8 @@ test("reference-naive with a matching baseline passes", async () => {
       dir,
     );
     expect(result.code).toBe(0);
-    expect(result.outputs.get("pass")).toBe("4");
-    expect(result.outputs.get("fail")).toBe("20");
+    expect(result.outputs.get("pass")).toBe("5");
+    expect(result.outputs.get("fail")).toBe("23");
     expect(result.outputs.get("regressions")).toBe("");
     expect(result.summary).toContain("### Baseline");
     expect(result.summary).toContain("regressions: none");
@@ -311,3 +311,19 @@ function memoryStream(): { stream: Writable; text: () => string } {
   });
   return { stream, text: () => body };
 }
+
+test("category is passed through as a filter", () => {
+  const result = runAction({
+    INPUT_ADAPTER: "reference-hardened",
+    INPUT_CATEGORY: "xml,stream",
+  });
+  expect(result.code).toBe(0);
+  expect(counted(result.outputs)).toBe(
+    scenarios.filter(
+      (scenario) =>
+        scenario.category === "xml" || scenario.category === "stream",
+    ).length,
+  );
+  expect(result.summary).toContain("truncated-xml");
+  expect(result.summary).not.toContain("truncated-json");
+});

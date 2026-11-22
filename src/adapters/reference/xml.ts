@@ -15,7 +15,9 @@ const OPEN_TAG = /^<([a-z0-9_]+)>/;
 
 // The fixture shape is a root tag whose child elements are the arguments.
 export function parseXmlCall(raw: string, options: XmlOptions): XmlResult {
-  const text = raw.trim();
+  // Only JSON whitespace is padding. trim() and \s also remove U+FEFF and the
+  // no-break space.
+  const text = raw.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
   const name = OPEN_TAG.exec(text)?.[1];
   if (!name) return { ok: false, reason: "invalid XML" };
   const open = `<${name}>`;
@@ -35,7 +37,7 @@ function strictBody(name: string, body: string): XmlResult {
   const seen = new Set<string>();
   let rest = body;
   for (;;) {
-    rest = rest.replace(/^\s+/, "");
+    rest = rest.replace(/^[ \t\r\n]+/, "");
     if (rest.length === 0) return { ok: true, call: { name, arguments: args } };
     const key = OPEN_TAG.exec(rest)?.[1];
     if (!key) return { ok: false, reason: "text between XML parameters" };

@@ -57,6 +57,7 @@ exit codes:
 `;
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+const MAX_TIMEOUT_MS = 2_147_483_647;
 
 type RunMode =
   | { kind: "adapter"; spec: string }
@@ -91,17 +92,24 @@ export async function runCli(
     stdout.write(`${gauntletVersion()}\n`);
     return 0;
   }
-  if (command === "list") return listCommand(argv.slice(1), stdout, stderr);
-  if (command === "show") return showCommand(argv.slice(1), stdout, stderr);
+  if (command === "list" || command === "show") {
+    if (argv.includes("--help") || argv.includes("-h")) {
+      stdout.write(HELP);
+      return 0;
+    }
+    return command === "list"
+      ? listCommand(argv.slice(1), stdout, stderr)
+      : showCommand(argv.slice(1), stdout, stderr);
+  }
   if (command !== "run") {
     stderr.write(USAGE);
     return 2;
   }
-  if (argv.includes("--help") || argv.includes("-h")) {
+  const flags = parseRunFlags(argv.slice(1));
+  if ("help" in flags) {
     stdout.write(HELP);
     return 0;
   }
-  const flags = parseRunFlags(argv.slice(1));
   if ("error" in flags) {
     stderr.write(`${flags.error}\n`);
     return 2;
@@ -238,7 +246,9 @@ function gauntletVersion(): string {
   return parsed.version;
 }
 
-function parseRunFlags(argv: readonly string[]): RunFlags | { error: string } {
+function parseRunFlags(
+  argv: readonly string[],
+): RunFlags | { error: string } | { help: true } {
   let adapter: string | undefined;
   let exec: string | undefined;
   let http: string | undefined;
@@ -255,6 +265,8 @@ function parseRunFlags(argv: readonly string[]): RunFlags | { error: string } {
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (token === undefined) continue;
+    // Only in flag position. `--name -h` names the adapter -h.
+    if (token === "--help" || token === "-h") return { help: true };
     if (token === "--json") {
       json = true;
       continue;
@@ -284,7 +296,10 @@ function parseRunFlags(argv: readonly string[]): RunFlags | { error: string } {
         return { error: `missing ${token} value` };
       }
       if (token === "--timeout") {
-        if (!/^[1-9]\d*$/.test(value)) return { error: "invalid --timeout" };
+        // A timer delay above 2^31-1 fires at once.
+        if (!/^[1-9]\d*$/.test(value) || Number(value) > MAX_TIMEOUT_MS) {
+          return { error: "invalid --timeout" };
+        }
         timeoutMs = Number(value);
       } else if (token === "--name") {
         if (value.length === 0) return { error: "missing --name value" };
@@ -295,8 +310,14 @@ function parseRunFlags(argv: readonly string[]): RunFlags | { error: string } {
       else if (token === "--baseline") baseline = value;
       else if (token === "--update-baseline") updateBaseline = value;
       else if (token === "--junit") junit = value;
-      else if (token === "--category") categories.push(...splitList(value));
-      else scenarioIds.push(...splitList(value));
+      else {
+        // An unset shell variable arrives as "". Running every scenario
+        // would be the opposite of what was asked.
+        const names = splitList(value);
+        if (names.length === 0) return { error: `missing ${token} value` };
+        if (token === "--category") categories.push(...names);
+        else scenarioIds.push(...names);
+      }
       index += 1;
       continue;
     }
@@ -315,6 +336,20 @@ function parseRunFlags(argv: readonly string[]): RunFlags | { error: string } {
     return {
       error: "--baseline and --update-baseline are mutually exclusive",
     };
+  }
+  // A baseline is the whole suite. Recording a filtered run would drop every
+  // other scenario from the file, and they would come back as new.
+  if (
+    updateBaseline !== undefined &&
+    (scenarioIds.length > 0 || categories.length > 0)
+  ) {
+    return {
+      error:
+        "--update-baseline records every scenario; remove --scenario and --category",
+    };
+  }
+  if (http !== undefined && !isHttpUrl(http)) {
+    return { error: `invalid --http url ${http}` };
   }
   const shared = {
     scenarios: scenarioIds,
@@ -478,6 +513,15 @@ function writeComparisonNotes(
   }
 }
 
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function splitList(value: string): string[] {
   return value
     .split(",")
@@ -522,11 +566,21 @@ function isDirectRun(): boolean {
   }
 }
 
+// A write to a pipe can still be queued when the process exits, and exit
+// drops what is queued. The empty write calls back once the stream is flushed.
+function flushed(stream: NodeJS.WritableStream): Promise<void> {
+  return new Promise((resolve) => {
+    stream.write("", () => resolve());
+  });
+}
+
 if (isDirectRun()) {
   const code = await runCli(
     process.argv.slice(2),
     process.stdout,
     process.stderr,
   );
+  await Promise.all([flushed(process.stdout), flushed(process.stderr)]);
+  // exit, not exitCode: an adapter that timed out may hold the loop open.
   process.exit(code);
 }

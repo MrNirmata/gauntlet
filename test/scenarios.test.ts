@@ -31,12 +31,13 @@ test("reference-hardened passes every scenario", async () => {
 });
 
 // A parser that does not repair is safe from a repair bug, one that does not
-// trim cannot trim content, and JSON.parse does not recurse. Those are passes
-// the naive adapter earns.
+// trim cannot trim content, JSON.parse does not recurse, and the naive
+// adapter hands a failed tool back as its result. Those are passes it earns.
 const NAIVE_PASSES = [
   "content-whitespace-kept",
   "trailing-comma-in-string",
   "duplicate-keys-after-repair",
+  "path-unusable",
   "deep-nesting",
 ];
 

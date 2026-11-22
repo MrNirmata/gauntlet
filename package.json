@@ -1,6 +1,6 @@
 {
   "name": "@mrnirmata/gauntlet",
-  "version": "0.1.1",
+  "version": "0.2.0-dev",
   "description": "Adversarial checks for the code that turns model output into a tool call.",
   "keywords": [
     "tool-call",
@@ -45,6 +45,7 @@
     "clean": "node scripts/clean.mjs",
     "build": "node scripts/clean.mjs && tsc",
     "prepack": "node scripts/clean.mjs && tsc",
+    "prepare": "node scripts/clean.mjs && tsc",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "node scripts/clean.mjs && tsc && vitest run",
     "lint": "biome check .",

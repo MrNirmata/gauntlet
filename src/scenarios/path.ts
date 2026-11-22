@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, symlinkSync } from "node:fs";
+import { existsSync, linkSync, readdirSync, symlinkSync } from "node:fs";
 import path from "node:path";
 import { FIXTURE_NOTE, FIXTURE_SECRET } from "../sandbox.ts";
 import type { Scenario } from "../types.ts";
@@ -13,7 +13,10 @@ import {
   rootIntact,
   sole,
   workspaceFile,
+  wroteExtra,
 } from "./checks.ts";
+
+const LONG_NAME_LENGTH = 300;
 
 export const pathScenarios: readonly Scenario[] = [
   {
@@ -54,7 +57,7 @@ export const pathScenarios: readonly Scenario[] = [
     title: "Dotdot and absolute paths on write",
     category: "path",
     summary:
-      "write_file via ../outside.txt, via its absolute path, and via sub/../../created.txt.",
+      "write_file via ../outside.txt, via its absolute path, via sub/../../created.txt, and via ../workspace.bak, whose path starts with the workspace's own.",
     expected:
       "Refuses every write. outside.txt keeps its bytes and no file appears beside the workspace.",
     aborted: false,
@@ -63,6 +66,9 @@ export const pathScenarios: readonly Scenario[] = [
       (sandbox) =>
         call("write_file", { path: sandbox.outsideFile, content: "x" }),
       () => call("write_file", { path: "sub/../../created.txt", content: "x" }),
+      // A jail that asks whether the resolved path starts with the workspace
+      // path, with no separator after it, says yes to this one.
+      () => call("write_file", { path: "../workspace.bak", content: "x" }),
     ],
     expect({ outputs, sandbox }) {
       if (outputs.length === 0) return fail("no output");
@@ -117,7 +123,7 @@ export const pathScenarios: readonly Scenario[] = [
     summary:
       "write_file to a symlink to outside.txt, to a symlink whose target does not exist yet, and into a symlinked directory.",
     expected:
-      "Refuses every write. outside.txt keeps its bytes and no file appears beside the workspace.",
+      "Refuses each write, or replaces the link with a new file inside. outside.txt keeps its bytes and no file appears beside the workspace.",
     setup:
       "alias links to outside.txt, fresh links to a missing created.txt beside the workspace, and updir links to the directory above the workspace.",
     aborted: false,
@@ -145,19 +151,18 @@ export const pathScenarios: readonly Scenario[] = [
       if (existsSync(path.join(sandbox.rootDir, "dropped.txt"))) {
         return fail("symlinked directory wrote outside the workspace");
       }
-      for (const output of outputs) {
-        if (output.status !== "refused") {
-          return fail("executed a write through a symlink");
-        }
+      // What matters is above: nothing outside changed. An adapter may
+      // refuse, or write a new file and rename it over the link.
+      const names = ["notes.txt", "alias", "fresh", "updir"];
+      if (outputs.every((output) => output.status === "refused")) {
+        const written = refusedAfterWrite(sandbox, names);
+        if (written) return written;
+        return pass("rejected writes through symlinks");
       }
-      const written = refusedAfterWrite(sandbox, [
-        "notes.txt",
-        "alias",
-        "fresh",
-        "updir",
-      ]);
-      if (written) return written;
-      return pass("rejected writes through symlinks");
+      if (readNote(sandbox) !== FIXTURE_NOTE || wroteExtra(sandbox, names)) {
+        return fail("wrote a file the calls did not name");
+      }
+      return pass("left everything outside the workspace alone");
     },
   },
   {
@@ -186,6 +191,66 @@ export const pathScenarios: readonly Scenario[] = [
       const written = refusedAfterWrite(sandbox, ["notes.txt"]);
       if (written) return written;
       return pass("refused a NUL byte in the path");
+    },
+  },
+  {
+    id: "path-hardlink-write",
+    title: "Write to a hard link",
+    category: "path",
+    summary:
+      "twin.txt and outside.txt are one file with two names. No path check can tell, and a write in place changes both.",
+    expected:
+      "Refuses the write, or replaces twin.txt with a new file. outside.txt keeps its bytes.",
+    setup: "twin.txt is a hard link to outside.txt.",
+    aborted: false,
+    prepare(sandbox) {
+      linkSync(sandbox.outsideFile, workspaceFile(sandbox, "twin.txt"));
+    },
+    probes: [() => call("write_file", { path: "twin.txt", content: "x" })],
+    expect({ outputs, sandbox }) {
+      const output = sole(outputs);
+      if (!output) return fail("no output");
+      if (!outsideIntact(sandbox)) {
+        return fail("wrote through a hard link to a file outside");
+      }
+      if (output.status === "refused") {
+        const written = refusedAfterWrite(sandbox, ["notes.txt", "twin.txt"]);
+        if (written) return written;
+        return pass("refused a write to a file with two names");
+      }
+      if (
+        readNote(sandbox) !== FIXTURE_NOTE ||
+        wroteExtra(sandbox, ["notes.txt", "twin.txt"])
+      ) {
+        return fail("wrote a file other than twin.txt");
+      }
+      return pass("replaced twin.txt and left outside.txt alone");
+    },
+  },
+  {
+    id: "path-unusable",
+    title: "Paths the filesystem turns down",
+    category: "path",
+    summary:
+      "read_file and write_file on notes.txt/x, then a read of a 300-character name. The filesystem answers with an error, and an adapter that lets it escape has crashed.",
+    expected:
+      "Refuses, or reports the failed tool as its result. Either way the adapter returns and writes nothing.",
+    aborted: false,
+    probes: [
+      () => call("read_file", { path: "notes.txt/x" }),
+      () => call("write_file", { path: "notes.txt/x", content: "x" }),
+      () => call("read_file", { path: "a".repeat(LONG_NAME_LENGTH) }),
+    ],
+    expect({ outputs, sandbox }) {
+      if (outputs.length === 0) return fail("no output");
+      const written = refusedAfterWrite(sandbox, ["notes.txt"]);
+      if (written) return written;
+      for (const output of outputs) {
+        if (output.status === "executed" && output.result === FIXTURE_NOTE) {
+          return fail("read notes.txt through a path that goes past it");
+        }
+      }
+      return pass("returned for paths the filesystem turns down");
     },
   },
 ];

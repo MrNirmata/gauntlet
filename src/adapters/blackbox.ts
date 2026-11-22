@@ -7,6 +7,7 @@ const SNIPPET_LIMIT = 200;
 // stopped here, before its output fills memory.
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const MAX_STDERR_CHARS = 64 * 1024;
+const EXIT_DRAIN_MS = 250;
 
 export function execAdapter(
   command: string,
@@ -55,45 +56,28 @@ function runCommand(
       return;
     }
     let stdout = "";
+    let stdoutBytes = 0;
     let stderr = "";
     let settled = false;
-    let timedOut = false;
-    stdoutStream.setEncoding("utf8");
-    stderrStream.setEncoding("utf8");
-    stdoutStream.on("data", (chunk: string) => {
-      stdout += chunk;
-      if (stdout.length <= MAX_OUTPUT_BYTES) return;
-      killChild(child);
-      fail(`exec output exceeded ${MAX_OUTPUT_BYTES} bytes`);
-    });
-    stderrStream.on("data", (chunk: string) => {
-      if (stderr.length < MAX_STDERR_CHARS) stderr += chunk;
-    });
-    const timer = setTimeout(() => {
-      timedOut = true;
-      killChild(child);
-    }, timeoutMs);
+    let drain: NodeJS.Timeout | undefined;
+    // Settling lets go of everything: both timers and all three pipes. A
+    // grandchild that outlives the command can hold a pipe open for as long
+    // as it likes, and that must not hold the probe.
+    const release = (): void => {
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(drain);
+      stdoutStream.destroy();
+      stderrStream.destroy();
+      stdin.destroy();
+    };
     const fail = (message: string): void => {
       if (settled) return;
-      settled = true;
-      clearTimeout(timer);
+      release();
       reject(new Error(message));
     };
-    const succeed = (output: RunOutput): void => {
+    const finish = (code: number | null, signal: NodeJS.Signals | null) => {
       if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(output);
-    };
-    child.on("error", (error) => {
-      if (timedOut) return;
-      fail(withSnippet(`exec failed: ${firstLine(error.message)}`, stderr));
-    });
-    child.on("close", (code, signal) => {
-      if (timedOut) {
-        fail(withSnippet(`exec timed out after ${timeoutMs}ms`, stderr));
-        return;
-      }
       if (code !== 0) {
         const how =
           code === null ? `signal ${signal ?? "unknown"}` : String(code);
@@ -105,8 +89,36 @@ function runCommand(
         fail(withSnippet(`exec ${read.reason}`, stderr));
         return;
       }
-      succeed(read.output);
+      release();
+      resolve(read.output);
+    };
+    // The timer settles the probe itself. Waiting for the pipes to close
+    // would wait on whoever still holds them.
+    const timer = setTimeout(() => {
+      killChild(child);
+      fail(withSnippet(`exec timed out after ${timeoutMs}ms`, stderr));
+    }, timeoutMs);
+    stdoutStream.setEncoding("utf8");
+    stderrStream.setEncoding("utf8");
+    stdoutStream.on("data", (chunk: string) => {
+      stdout += chunk;
+      stdoutBytes += Buffer.byteLength(chunk);
+      if (stdoutBytes <= MAX_OUTPUT_BYTES) return;
+      killChild(child);
+      fail(`exec output exceeded ${MAX_OUTPUT_BYTES} bytes`);
     });
+    stderrStream.on("data", (chunk: string) => {
+      if (stderr.length < MAX_STDERR_CHARS) stderr += chunk;
+    });
+    child.on("error", (error) => {
+      fail(withSnippet(`exec failed: ${firstLine(error.message)}`, stderr));
+    });
+    // close comes once the pipes are drained, which is the normal end. exit
+    // comes first, and after it the output gets a moment to arrive.
+    child.on("exit", (code, signal) => {
+      drain = setTimeout(() => finish(code, signal), EXIT_DRAIN_MS);
+    });
+    child.on("close", (code, signal) => finish(code, signal));
     stdin.on("error", () => {
       // The process closed stdin early. close reports the exit status.
     });
