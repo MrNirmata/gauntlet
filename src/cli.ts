@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -8,13 +8,53 @@ import { execAdapter, httpAdapter } from "./adapters/blackbox.ts";
 import { adapters } from "./adapters/index.ts";
 import type { BaselineComparison, BaselineData } from "./baseline.ts";
 import { compareBaseline, readBaseline, writeBaseline } from "./baseline.ts";
-import { formatJson, formatList, formatRun } from "./format.ts";
+import {
+  formatDetails,
+  formatJson,
+  formatJUnit,
+  formatList,
+  formatListJson,
+  formatRun,
+  formatShow,
+} from "./format.ts";
 import { runAll } from "./run.ts";
-import { scenarios } from "./scenarios.ts";
-import type { Adapter, Scenario } from "./types.ts";
+import { scenarios } from "./scenarios/index.ts";
+import type { Adapter, Category, RunOptions, Scenario } from "./types.ts";
 
 const USAGE =
-  "usage: gauntlet list | gauntlet run (--adapter <name-or-path> | --exec <command> | --http <url>) [--name <label>] [--timeout <ms>] [--scenario <id>] [--json] [--baseline <file> | --update-baseline <file>] [--strict]\n";
+  "usage: gauntlet list [--json] | gauntlet show <id> | gauntlet run (--adapter <name-or-path> | --exec <command> | --http <url>) [--name <label>] [--timeout <ms>] [--scenario <id>] [--category <name>] [--json] [--verbose] [--junit <file>] [--baseline <file> | --update-baseline <file>] [--strict]\n";
+
+const HELP = `Gauntlet feeds adversarial tool-call payloads to an adapter.
+
+commands:
+  gauntlet list [--json]     print every scenario
+  gauntlet show <id>         print one scenario and the payloads it sends
+  gauntlet run <target>      run the scenarios against an adapter
+  gauntlet help              print this text
+  gauntlet --version         print the version
+
+run targets, exactly one:
+  --adapter <name-or-path>   a built-in adapter, or a module that exports one
+  --exec <command>           a shell command, run once per probe
+  --http <url>               a URL that receives one POST per probe
+
+run options:
+  --scenario <id>            run only this scenario. Repeat it, or separate ids with commas
+  --category <name>          run only this category. Repeat it, or separate names with commas
+  --timeout <ms>             limit for one probe. The default is 10000
+  --name <label>             adapter name in the report
+  --json                     print the report as one JSON object
+  --verbose                  add the payloads and outputs of every scenario that did not pass
+  --junit <file>             also write the results as JUnit XML
+  --baseline <file>          compare with a recorded run. Exit 1 only on a regression
+  --update-baseline <file>   record this run and exit 0
+  --strict                   with --baseline, count a new failing scenario as a regression
+
+exit codes:
+  0  every scenario passed or was not covered, or no scenario regressed
+  1  a scenario failed, errored, or regressed
+  2  the command line, the adapter, or a file was wrong
+`;
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 
@@ -25,8 +65,11 @@ type RunMode =
 
 type RunFlags = {
   mode: RunMode;
-  scenario: string | undefined;
+  scenarios: readonly string[];
+  categories: readonly string[];
   json: boolean;
+  verbose: boolean;
+  junit: string | undefined;
   timeoutMs: number;
   name: string | undefined;
   baseline: string | undefined;
@@ -40,13 +83,23 @@ export async function runCli(
   stderr: NodeJS.WritableStream,
 ): Promise<number> {
   const command = argv[0];
-  if (command === "list") {
-    stdout.write(formatList(scenarios));
+  if (command === "help" || command === "--help" || command === "-h") {
+    stdout.write(HELP);
     return 0;
   }
+  if (command === "--version" || command === "-V") {
+    stdout.write(`${gauntletVersion()}\n`);
+    return 0;
+  }
+  if (command === "list") return listCommand(argv.slice(1), stdout, stderr);
+  if (command === "show") return showCommand(argv.slice(1), stdout, stderr);
   if (command !== "run") {
     stderr.write(USAGE);
     return 2;
+  }
+  if (argv.includes("--help") || argv.includes("-h")) {
+    stdout.write(HELP);
+    return 0;
   }
   const flags = parseRunFlags(argv.slice(1));
   if ("error" in flags) {
@@ -55,7 +108,7 @@ export async function runCli(
   }
   const adapter = await resolveRunAdapter(flags, stderr);
   if (!adapter) return 2;
-  const selected = selectScenarios(flags.scenario);
+  const selected = selectScenarios(flags.scenarios, flags.categories);
   if ("error" in selected) {
     stderr.write(`${selected.error}\n`);
     return 2;
@@ -69,7 +122,11 @@ export async function runCli(
     }
     recorded = loaded;
   }
-  const results = await runAll(adapter, selected.scenarios);
+  // --exec and --http enforce the limit themselves and kill what they
+  // started. An in-process adapter gets the same limit from the runner.
+  const options: RunOptions =
+    flags.mode.kind === "adapter" ? { timeoutMs: flags.timeoutMs } : {};
+  const results = await runAll(adapter, selected.scenarios, options);
   const version = gauntletVersion();
   const summary = recorded
     ? compareBaseline(
@@ -79,12 +136,30 @@ export async function runCli(
         flags.strict,
       )
     : undefined;
-  stdout.write(
-    flags.json
-      ? formatJson(adapter.name, version, results, summary)
-      : formatRun(adapter.name, results, summary),
-  );
+  if (flags.json) {
+    stdout.write(
+      formatJson(adapter.name, version, results, summary, {
+        probes: flags.verbose,
+      }),
+    );
+  } else {
+    stdout.write(formatRun(adapter.name, results, summary));
+    if (flags.verbose) {
+      const details = formatDetails(results, scenarios);
+      if (details.length > 0) stdout.write(`\n${details}`);
+    }
+  }
   if (summary) writeComparisonNotes(stderr, results, summary, flags.strict);
+  if (flags.junit !== undefined) {
+    const failure = writeReportFile(
+      flags.junit,
+      formatJUnit(adapter.name, results),
+    );
+    if (failure !== undefined) {
+      stderr.write(`${failure}\n`);
+      return 2;
+    }
+  }
   if (flags.updateBaseline !== undefined) {
     const failure = writeBaseline(
       flags.updateBaseline,
@@ -103,6 +178,50 @@ export async function runCli(
     (result) => result.status === "fail" || result.status === "error",
   );
   return bad ? 1 : 0;
+}
+
+function listCommand(
+  argv: readonly string[],
+  stdout: NodeJS.WritableStream,
+  stderr: NodeJS.WritableStream,
+): number {
+  const unknown = argv.find((token) => token !== "--json");
+  if (unknown !== undefined) {
+    stderr.write(`unknown argument ${unknown}\n`);
+    return 2;
+  }
+  stdout.write(
+    argv.includes("--json") ? formatListJson(scenarios) : formatList(scenarios),
+  );
+  return 0;
+}
+
+function showCommand(
+  argv: readonly string[],
+  stdout: NodeJS.WritableStream,
+  stderr: NodeJS.WritableStream,
+): number {
+  const id = argv[0];
+  if (id === undefined || argv.length !== 1) {
+    stderr.write("usage: gauntlet show <id>\n");
+    return 2;
+  }
+  const scenario = scenarios.find((item) => item.id === id);
+  if (!scenario) {
+    stderr.write(`unknown scenario ${id}\n`);
+    return 2;
+  }
+  stdout.write(formatShow(scenario));
+  return 0;
+}
+
+function writeReportFile(file: string, text: string): string | undefined {
+  try {
+    writeFileSync(path.resolve(process.cwd(), file), text, "utf8");
+  } catch (error) {
+    return `could not write ${file}: ${errorLine(error)}`;
+  }
+  return undefined;
 }
 
 function gauntletVersion(): string {
@@ -125,8 +244,11 @@ function parseRunFlags(argv: readonly string[]): RunFlags | { error: string } {
   let http: string | undefined;
   let timeoutMs = DEFAULT_TIMEOUT_MS;
   let name: string | undefined;
-  let scenario: string | undefined;
+  const scenarioIds: string[] = [];
+  const categories: string[] = [];
   let json = false;
+  let verbose = false;
+  let junit: string | undefined;
   let baseline: string | undefined;
   let updateBaseline: string | undefined;
   let strict = false;
@@ -141,6 +263,10 @@ function parseRunFlags(argv: readonly string[]): RunFlags | { error: string } {
       strict = true;
       continue;
     }
+    if (token === "--verbose") {
+      verbose = true;
+      continue;
+    }
     if (
       token === "--adapter" ||
       token === "--exec" ||
@@ -148,6 +274,8 @@ function parseRunFlags(argv: readonly string[]): RunFlags | { error: string } {
       token === "--timeout" ||
       token === "--name" ||
       token === "--scenario" ||
+      token === "--category" ||
+      token === "--junit" ||
       token === "--baseline" ||
       token === "--update-baseline"
     ) {
@@ -166,7 +294,9 @@ function parseRunFlags(argv: readonly string[]): RunFlags | { error: string } {
       else if (token === "--http") http = value;
       else if (token === "--baseline") baseline = value;
       else if (token === "--update-baseline") updateBaseline = value;
-      else scenario = value;
+      else if (token === "--junit") junit = value;
+      else if (token === "--category") categories.push(...splitList(value));
+      else scenarioIds.push(...splitList(value));
       index += 1;
       continue;
     }
@@ -187,8 +317,11 @@ function parseRunFlags(argv: readonly string[]): RunFlags | { error: string } {
     };
   }
   const shared = {
-    scenario,
+    scenarios: scenarioIds,
+    categories,
     json,
+    verbose,
+    junit,
     timeoutMs,
     name,
     baseline,
@@ -345,13 +478,38 @@ function writeComparisonNotes(
   }
 }
 
+function splitList(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+// Ids and categories add up. The report keeps the order of the full list.
 function selectScenarios(
-  id: string | undefined,
+  ids: readonly string[],
+  categories: readonly string[],
 ): { scenarios: readonly Scenario[] } | { error: string } {
-  if (id === undefined) return { scenarios };
-  const match = scenarios.find((scenario) => scenario.id === id);
-  if (!match) return { error: `unknown scenario ${id}` };
-  return { scenarios: [match] };
+  if (ids.length === 0 && categories.length === 0) return { scenarios };
+  for (const id of ids) {
+    if (!scenarios.some((scenario) => scenario.id === id)) {
+      return { error: `unknown scenario ${id}` };
+    }
+  }
+  const known = new Set<Category>(scenarios.map((item) => item.category));
+  for (const category of categories) {
+    if (![...known].some((name) => name === category)) {
+      return {
+        error: `unknown category ${category}; one of ${[...known].join(", ")}`,
+      };
+    }
+  }
+  return {
+    scenarios: scenarios.filter(
+      (scenario) =>
+        ids.includes(scenario.id) || categories.includes(scenario.category),
+    ),
+  };
 }
 
 function isDirectRun(): boolean {

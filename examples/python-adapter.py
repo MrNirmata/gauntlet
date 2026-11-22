@@ -28,8 +28,10 @@ def main() -> None:
         sys.exit("expected raw and sandboxDir strings")
     try:
         output = execute(raw, sandbox)
-    except OSError as error:
-        output = {"status": "refused", "reason": str(error)}
+    except (OSError, ValueError, RecursionError) as error:
+        # ValueError is a NUL byte in a path. RecursionError is JSON nested
+        # deeper than the interpreter's stack.
+        output = {"status": "refused", "reason": str(error) or type(error).__name__}
     json.dump(output, sys.stdout)
     sys.stdout.write("\n")
 

@@ -254,6 +254,24 @@ test.skipIf(python3.status !== 0)(
   },
 );
 
+test.skipIf(python3.status !== 0)(
+  "hardened python example passes every scenario",
+  async () => {
+    const result = await run([
+      "run",
+      "--exec",
+      "python3 examples/python-hardened.py",
+      "--json",
+    ]);
+    expect(result.stderr).toBe("");
+    expect(result.code).toBe(0);
+    const report = readRun(result.stdout);
+    for (const row of report.scenarios) {
+      expect(row.status, `${row.id}: ${row.reason}`).toBe("pass");
+    }
+  },
+);
+
 async function serveNaive(
   req: IncomingMessage,
   res: ServerResponse,

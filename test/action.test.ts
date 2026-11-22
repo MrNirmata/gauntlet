@@ -11,7 +11,7 @@ import path from "node:path";
 import { Writable } from "node:stream";
 import { expect, test } from "vitest";
 import { runCli } from "../src/cli.ts";
-import { scenarios } from "../src/scenarios.ts";
+import { scenarios } from "../src/scenarios/index.ts";
 
 const script = path.resolve("scripts/action-run.sh");
 const execNaive = path.resolve("test/fixtures/exec-naive.mjs");
@@ -19,15 +19,15 @@ const execNaive = path.resolve("test/fixtures/exec-naive.mjs");
 test("reference-naive without a baseline fails the step", () => {
   const result = runAction({ INPUT_ADAPTER: "reference-naive" });
   expect(result.code).toBe(1);
-  expect(result.outputs.get("pass")).toBe("1");
-  expect(result.outputs.get("fail")).toBe("11");
+  expect(result.outputs.get("pass")).toBe("3");
+  expect(result.outputs.get("fail")).toBe("19");
   expect(result.outputs.get("error")).toBe("0");
   expect(result.outputs.get("not-covered")).toBe("0");
   expect(result.outputs.get("regressions")).toBe("");
   expect(counted(result.outputs)).toBe(scenarios.length);
   expect(result.summary).toContain("| scenario | category | status | reason |");
   expect(result.summary).toContain(
-    "1 passed, 11 failed, 0 errors, 0 not covered",
+    "3 passed, 19 failed, 0 errors, 0 not covered",
   );
   expect(result.summary).not.toContain("### Baseline");
   for (const scenario of scenarios) {
@@ -51,8 +51,8 @@ test("reference-naive with a matching baseline passes", async () => {
       dir,
     );
     expect(result.code).toBe(0);
-    expect(result.outputs.get("pass")).toBe("1");
-    expect(result.outputs.get("fail")).toBe("11");
+    expect(result.outputs.get("pass")).toBe("3");
+    expect(result.outputs.get("fail")).toBe("19");
     expect(result.outputs.get("regressions")).toBe("");
     expect(result.summary).toContain("### Baseline");
     expect(result.summary).toContain("regressions: none");

@@ -42,9 +42,11 @@
     ]
   },
   "scripts": {
-    "build": "tsc",
+    "clean": "node scripts/clean.mjs",
+    "build": "node scripts/clean.mjs && tsc",
+    "prepack": "node scripts/clean.mjs && tsc",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
-    "test": "tsc && vitest run",
+    "test": "node scripts/clean.mjs && tsc && vitest run",
     "lint": "biome check .",
     "format": "biome check --write ."
   },

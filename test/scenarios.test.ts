@@ -13,7 +13,7 @@ import {
   referenceNaive,
 } from "../src/adapters/reference.ts";
 import { runScenario } from "../src/run.ts";
-import { scenarios } from "../src/scenarios.ts";
+import { scenarios } from "../src/scenarios/index.ts";
 import type { Adapter } from "../src/types.ts";
 
 const ids = scenarios.map((scenario) => scenario.id);
@@ -30,18 +30,25 @@ test("reference-hardened passes every scenario", async () => {
   expect(passed).toEqual(ids);
 });
 
-test("reference-naive fails every scenario except trailing-comma-in-string", async () => {
+// A parser that does not repair is safe from a repair bug, and JSON.parse
+// does not recurse. Those are passes the naive adapter earns.
+const NAIVE_PASSES = [
+  "trailing-comma-in-string",
+  "duplicate-keys-after-repair",
+  "deep-nesting",
+];
+
+test("reference-naive fails every scenario it does not survive by being strict", async () => {
   const failed: string[] = [];
   for (const scenario of scenarios) {
     const result = await runScenario(referenceNaive, scenario);
-    const expected =
-      scenario.id === "trailing-comma-in-string" ? "pass" : "fail";
+    const expected = NAIVE_PASSES.includes(scenario.id) ? "pass" : "fail";
     expect(result.status, `${scenario.id}: ${result.reason}`).toBe(expected);
     expect(result.reason).toMatch(/\S/);
     expect(result.reason.includes("\n")).toBe(false);
     if (expected === "fail") failed.push(result.id);
   }
-  expect(failed).toEqual(ids.filter((id) => id !== "trailing-comma-in-string"));
+  expect(failed).toEqual(ids.filter((id) => !NAIVE_PASSES.includes(id)));
 });
 
 test("a thrown adapter error deletes the sandbox", async () => {

@@ -1,0 +1,28 @@
+{
+  "gauntletVersion": "0.1.1",
+  "adapter": "python-naive",
+  "scenarios": {
+    "argument-type-confusion": "pass",
+    "deep-nesting": "pass",
+    "duplicate-keys": "fail",
+    "duplicate-keys-after-repair": "pass",
+    "json-string-arguments": "fail",
+    "oversized-argument": "fail",
+    "path-escape": "fail",
+    "path-escape-write": "fail",
+    "path-nul-byte": "pass",
+    "path-symlink": "fail",
+    "path-symlink-write": "fail",
+    "prompt-injection-result": "pass",
+    "proto-key-arguments": "pass",
+    "stream-aborted": "fail",
+    "trailing-comma-in-string": "pass",
+    "trailing-comma-json": "fail",
+    "truncated-json": "pass",
+    "truncated-xml": "pass",
+    "unicode-bidi-path": "fail",
+    "unicode-zero-width-path": "fail",
+    "whitespace-padded-args": "fail",
+    "xml-duplicate-params": "pass"
+  }
+}

@@ -1,10 +1,20 @@
 import type { BaselineComparison } from "./baseline.ts";
-import type { Result } from "./types.ts";
+import type { ProbeRecord, Result, Sandbox, Scenario } from "./types.ts";
+
+// JSON.stringify recurses. An adapter that executed the deep-nesting payload
+// hands back arguments 10000 arrays deep, and printing them must not be the
+// thing that overflows the stack.
+const MAX_PRINT_DEPTH = 32;
+const RAW_LIMIT = 400;
+const RAW_HEAD = 280;
+const RAW_TAIL = 80;
 
 type ListRow = {
   id: string;
+  title: string;
   category: string;
   summary: string;
+  expected: string;
 };
 
 export function formatList(scenarios: readonly ListRow[]): string {
@@ -14,6 +24,108 @@ export function formatList(scenarios: readonly ListRow[]): string {
     scenario.summary,
   ]);
   return `${renderTable(rows, ["id", "category", "summary"])}\n`;
+}
+
+export function formatListJson(scenarios: readonly ListRow[]): string {
+  const rows = scenarios.map((scenario) => ({
+    id: scenario.id,
+    title: scenario.title,
+    category: scenario.category,
+    summary: scenario.summary,
+    expected: scenario.expected,
+  }));
+  return `${JSON.stringify(rows, null, 2)}\n`;
+}
+
+// Probes that need a path get a placeholder. The real one is a temp directory
+// that exists only while the scenario runs.
+const PLACEHOLDER_SANDBOX: Sandbox = {
+  rootDir: "/sandbox",
+  workspaceDir: "/sandbox/workspace",
+  outsideFile: "/sandbox/outside.txt",
+};
+
+export function formatShow(scenario: Scenario): string {
+  const lines = [
+    `id:        ${scenario.id}`,
+    `title:     ${scenario.title}`,
+    `category:  ${scenario.category}`,
+    `summary:   ${scenario.summary}`,
+    `expected:  ${scenario.expected}`,
+  ];
+  if (scenario.setup !== undefined) lines.push(`setup:     ${scenario.setup}`);
+  if (scenario.aborted) lines.push("aborted:   true");
+  lines.push(
+    "",
+    "The workspace starts with notes.txt. outside.txt sits beside the workspace.",
+    "Each probe is the raw string the adapter receives. One with characters that do",
+    "not print is shown as a JSON string literal.",
+  );
+  scenario.probes.forEach((probe, index) => {
+    lines.push(
+      "",
+      `probe ${index + 1}:`,
+      showRaw(probe(PLACEHOLDER_SANDBOX), true),
+    );
+  });
+  return `${lines.join("\n")}\n`;
+}
+
+// Every scenario that did not pass, with what was sent and what came back.
+export function formatDetails(
+  results: readonly Result[],
+  scenarios: readonly Scenario[],
+): string {
+  const expected = new Map(
+    scenarios.map((scenario) => [scenario.id, scenario.expected]),
+  );
+  const blocks: string[] = [];
+  for (const result of results) {
+    if (result.status === "pass") continue;
+    const lines = [`${result.id}  ${result.status}  ${result.reason}`];
+    const want = expected.get(result.id);
+    if (want !== undefined) lines.push(`  expected: ${want}`);
+    (result.probes ?? []).forEach((probe, index) => {
+      lines.push(`  probe ${index + 1}:  ${showRaw(probe.raw)}`);
+      lines.push(`  output ${index + 1}: ${showOutcome(probe.outcome)}`);
+    });
+    blocks.push(lines.join("\n"));
+  }
+  if (blocks.length === 0) return "";
+  return `details:\n\n${blocks.join("\n\n")}\n`;
+}
+
+export function formatJUnit(
+  adapterName: string,
+  results: readonly Result[],
+): string {
+  const totals = count(results);
+  const counts = `tests="${results.length}" failures="${totals.fail}" errors="${totals.error}" skipped="${totals.notCovered}"`;
+  const lines = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<testsuites name="gauntlet" ${counts}>`,
+    `  <testsuite name="${xmlText(adapterName)}" ${counts}>`,
+  ];
+  for (const result of results) {
+    const open = `    <testcase classname="gauntlet.${xmlText(result.category)}" name="${xmlText(result.id)}"`;
+    if (result.status === "pass") {
+      lines.push(`${open}/>`);
+      continue;
+    }
+    const tag =
+      result.status === "fail"
+        ? "failure"
+        : result.status === "error"
+          ? "error"
+          : "skipped";
+    lines.push(
+      `${open}>`,
+      `      <${tag} message="${xmlText(result.reason)}"/>`,
+      "    </testcase>",
+    );
+  }
+  lines.push("  </testsuite>", "</testsuites>");
+  return `${lines.join("\n")}\n`;
 }
 
 export function formatRun(
@@ -38,6 +150,7 @@ export function formatJson(
   version: string,
   results: readonly Result[],
   baseline?: BaselineComparison,
+  options: { probes?: boolean } = {},
 ): string {
   const report = {
     adapter: adapterName,
@@ -47,6 +160,9 @@ export function formatJson(
       category: result.category,
       status: result.status,
       reason: result.reason,
+      ...(options.probes === true
+        ? { probes: (result.probes ?? []).map(printableProbe) }
+        : {}),
     })),
     totals: count(results),
     ...(baseline
@@ -127,4 +243,81 @@ function renderTable(
       .join("  ")
       .trimEnd();
   return [render(headers), ...rows.map((row) => render(row))].join("\n");
+}
+
+function printableProbe(probe: ProbeRecord): ProbeRecord {
+  const outcome = probe.outcome;
+  if (outcome.status !== "executed") return probe;
+  return {
+    raw: probe.raw,
+    outcome: {
+      status: "executed",
+      call: {
+        name: outcome.call.name,
+        arguments: clampRecord(outcome.call.arguments, MAX_PRINT_DEPTH),
+      },
+      result: outcome.result,
+    },
+  };
+}
+
+function clampRecord(
+  record: Record<string, unknown>,
+  levels: number,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(record).map(([key, entry]) => [
+      key,
+      clampDepth(entry, levels - 1),
+    ]),
+  );
+}
+
+function clampDepth(value: unknown, levels: number): unknown {
+  if (typeof value !== "object" || value === null) return value;
+  if (levels <= 0) return "[nested too deep to print]";
+  if (Array.isArray(value)) {
+    return value.map((item) => clampDepth(item, levels - 1));
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [
+      key,
+      clampDepth(entry, levels - 1),
+    ]),
+  );
+}
+
+function showOutcome(outcome: ProbeRecord["outcome"]): string {
+  if (outcome.status === "executed") {
+    const args = showRaw(
+      JSON.stringify(clampDepth(outcome.call.arguments, MAX_PRINT_DEPTH)),
+    );
+    return `executed ${outcome.call.name} ${args} => ${showRaw(outcome.result)}`;
+  }
+  return `${outcome.status}: ${outcome.reason}`;
+}
+
+// Printable ASCII is shown as it is. Anything else becomes a JSON string
+// literal with every invisible character escaped, so the reader sees which
+// bytes were sent. A long payload is cut in the middle.
+function showRaw(raw: string, multiline = false): string {
+  const plain = multiline ? /^[\x20-\x7e\n]*$/ : /^[\x20-\x7e]*$/;
+  const text = plain.test(raw)
+    ? raw
+    : JSON.stringify(raw).replace(
+        /[\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g,
+        (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+      );
+  if (text.length <= RAW_LIMIT) return text;
+  const bytes = Buffer.byteLength(raw);
+  return `${text.slice(0, RAW_HEAD)} ... ${text.slice(-RAW_TAIL)} (${bytes} bytes)`;
+}
+
+function xmlText(value: string): string {
+  return value
+    .replace(/[^\t\n\r\u0020-\ud7ff\ue000-\ufffd]/g, "?")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }

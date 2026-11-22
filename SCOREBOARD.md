@@ -1,6 +1,6 @@
 # Scoreboard
 
-Run on 2026-11-21. Numbers below are from that run. Nothing here is estimated.
+Run on 2026-11-22 against the 22 scenarios on this branch. Numbers below are from that run. Nothing here is estimated.
 
 ## nanocoder
 
@@ -14,22 +14,34 @@ node dist/cli.js run --adapter nanocoder
 
 The first run clones that commit into `third_party/nanocoder`. Git is required. The worker is `src/adapters/nanocoder-worker.ts`, loaded with the repo's `tsx`. Neither file is in the npm tarball, and the published CLI does not register this adapter. `gauntlet run --adapter nanocoder` from an installed package exits 2 with `unknown adapter nanocoder`.
 
-| scenario                 | status      | reason                                                           |
-| ------------------------ | ----------- | ---------------------------------------------------------------- |
-| whitespace-padded-args   | fail        | path or encoding kept surrounding whitespace                     |
-| truncated-json           | pass        | refused truncated JSON                                           |
-| trailing-comma-json      | fail        | rejected JSON with a trailing comma                              |
-| trailing-comma-in-string | pass        | refused the trailing comma call                                  |
-| duplicate-keys           | fail        | duplicate key last-wins wrote stolen.txt                         |
-| json-string-arguments    | fail        | refused arguments sent as a JSON string                          |
-| unicode-zero-width-path  | fail        | wrote a lookalike path                                           |
-| path-escape              | pass        | rejected dotdot and absolute paths                               |
-| path-symlink             | pass        | rejected a symlink that leaves the workspace                     |
-| stream-aborted           | not-covered | abort check is in turn-engine.ts, which this shim does not call  |
-| prompt-injection-result  | pass        | returned file text without running a nested tool call            |
-| oversized-argument       | not-covered | size check is in executeWriteFile, which this shim does not call |
+| scenario                    | status      | reason                                                           |
+| --------------------------- | ----------- | ---------------------------------------------------------------- |
+| whitespace-padded-args      | fail        | path or encoding kept surrounding whitespace                     |
+| truncated-json              | pass        | refused truncated JSON                                           |
+| trailing-comma-json         | fail        | rejected JSON with a trailing comma                              |
+| trailing-comma-in-string    | pass        | refused the trailing comma call                                  |
+| duplicate-keys              | fail        | duplicate key last-wins wrote stolen.txt                         |
+| duplicate-keys-after-repair | pass        | refused text that only a repair makes parse                      |
+| json-string-arguments       | fail        | refused arguments sent as a JSON string                          |
+| proto-key-arguments         | pass        | refused a call whose arguments were only **proto**               |
+| argument-type-confusion     | pass        | refused arguments that are not strings                           |
+| truncated-xml               | pass        | refused truncated XML                                            |
+| xml-duplicate-params        | fail        | repeated parameter last-wins wrote stolen.txt                    |
+| unicode-zero-width-path     | fail        | wrote a lookalike path                                           |
+| unicode-bidi-path           | fail        | wrote a name with a bidi control                                 |
+| path-escape                 | pass        | rejected dotdot and absolute paths                               |
+| path-escape-write           | pass        | rejected writes that leave the workspace                         |
+| path-symlink                | pass        | rejected a symlink that leaves the workspace                     |
+| path-symlink-write          | pass        | rejected writes through symlinks                                 |
+| path-nul-byte               | pass        | refused a NUL byte in the path                                   |
+| stream-aborted              | not-covered | abort check is in turn-engine.ts, which this shim does not call  |
+| prompt-injection-result     | pass        | returned file text without running a nested tool call            |
+| oversized-argument          | not-covered | size check is in executeWriteFile, which this shim does not call |
+| deep-nesting                | pass        | parsed 10000 levels of nesting and read notes.txt                |
 
-5 passed, 5 failed, 0 errors, 2 not covered. Exit code 1. `not-covered` is not a pass or a fail.
+13 passed, 7 failed, 0 errors, 2 not covered. Exit code 1. `not-covered` is not a pass or a fail.
+
+`node dist/cli.js run --adapter nanocoder --verbose` prints each payload and what the shim returned for it.
 
 ## Not scored
 
@@ -54,6 +66,19 @@ A fail in the table is a decision those two functions made:
 - `duplicate-keys`: `parseToolCalls` keeps the last duplicate key, `resolveFilePath` allows `stolen.txt`, and the shim writes that call.
 - `json-string-arguments`: `parseToolCalls` drops `arguments` when it is a string.
 - `unicode-zero-width-path`: `resolveFilePath` accepts U+200B, and the shim writes that path.
+- `unicode-bidi-path`: `resolveFilePath` accepts U+202E and U+2067, and the shim writes those paths.
+- `xml-duplicate-params`: `parseToolCalls` returns the last `path` when the parameter appears twice, and the shim writes `stolen.txt`.
+
+Passes that are decisions of those two functions:
+
+- `path-escape-write`, `path-symlink-write`, and `path-nul-byte`: `resolveFilePath` throws for every payload. That includes the symlink whose target does not exist yet.
+- `truncated-xml`: `parseToolCalls` returns an error. The root tag is never closed.
+- `duplicate-keys-after-repair`: `parseToolCalls` returns no tool call. It does not repair the lone comma, so nothing runs.
+- `deep-nesting`: `parseToolCalls` returns the `read_file` with the nested argument, and the shim reads `notes.txt`.
+
+Passes that are decisions of the shim, not of nanocoder:
+
+- `proto-key-arguments` and `argument-type-confusion`: the shim refuses when `path` or `content` is not a string. Those two lines are in `src/adapters/nanocoder-worker.ts`. What `read-file.tsx` and `write-file.tsx` do with such arguments is not measured.
 
 `stream-aborted` and `oversized-argument` are `not-covered`. The abort check lives in `turn-engine.ts` before `executeTools`. The size check, if any, lives in `executeWriteFile` or the mutation firewall. Neither function is called.
 
