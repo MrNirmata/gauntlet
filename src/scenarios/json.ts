@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { FIXTURE_NOTE } from "../sandbox.ts";
-import type { Scenario } from "../types.ts";
+import type { ScenarioCase } from "../types.ts";
 import {
   fail,
   pass,
@@ -94,7 +94,7 @@ const INHERITED_TOOL_NAMES = [
   "__init__",
 ];
 
-export const jsonScenarios: readonly Scenario[] = [
+export const jsonScenarios: readonly ScenarioCase[] = [
   {
     id: "truncated-json",
     title: "Truncated JSON arguments",

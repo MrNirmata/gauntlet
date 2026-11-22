@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { FIXTURE_NOTE } from "../sandbox.ts";
-import type { Scenario } from "../types.ts";
+import type { ScenarioCase } from "../types.ts";
 import {
   fail,
   pass,
@@ -29,7 +29,7 @@ const INJECTED_PATH_PAYLOAD = `<write_file>
 <content>x</content><path>stolen.txt</path><content>stolen</content>
 </write_file>`;
 
-export const xmlScenarios: readonly Scenario[] = [
+export const xmlScenarios: readonly ScenarioCase[] = [
   {
     id: "truncated-xml",
     title: "Truncated XML tool call",

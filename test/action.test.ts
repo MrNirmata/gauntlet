@@ -173,7 +173,7 @@ test("adapter and http together exit 2", () => {
   });
   expect(result.code).toBe(2);
   expect(result.stderr).toContain(
-    "--adapter, --exec, and --http are mutually exclusive",
+    "--adapter, --exec, --http, and --mcp are mutually exclusive",
   );
   expect(result.summary).toContain("exited 2");
   expect(result.outputs.size).toBe(0);

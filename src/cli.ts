@@ -6,6 +6,7 @@ import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { execAdapter, httpAdapter } from "./adapters/blackbox.ts";
 import { adapters } from "./adapters/index.ts";
+import { mcpAdapter } from "./adapters/mcp.ts";
 import type { BaselineComparison, BaselineData } from "./baseline.ts";
 import { compareBaseline, readBaseline, writeBaseline } from "./baseline.ts";
 import {
@@ -18,11 +19,12 @@ import {
   formatShow,
 } from "./format.ts";
 import { runAll } from "./run.ts";
+import { formatSarif } from "./sarif.ts";
 import { scenarios } from "./scenarios/index.ts";
-import type { Adapter, Category, RunOptions, Scenario } from "./types.ts";
+import type { Adapter, Category, RunOptions, Scenario, Tier } from "./types.ts";
 
 const USAGE =
-  "usage: gauntlet list [--json] | gauntlet show <id> | gauntlet run (--adapter <name-or-path> | --exec <command> | --http <url>) [--name <label>] [--timeout <ms>] [--scenario <id>] [--category <name>] [--json] [--verbose] [--junit <file>] [--baseline <file> | --update-baseline <file>] [--strict]\n";
+  "usage: gauntlet list [--json] | gauntlet show <id> | gauntlet run (--adapter <name-or-path> | --exec <command> | --http <url> | --mcp <command>) [options]. gauntlet help lists the options.\n";
 
 const HELP = `Gauntlet feeds adversarial tool-call payloads to an adapter.
 
@@ -37,22 +39,38 @@ run targets, exactly one:
   --adapter <name-or-path>   a built-in adapter, or a module that exports one
   --exec <command>           a shell command, run once per probe
   --http <url>               a URL that receives one POST per probe
+  --mcp <command>            an MCP server on stdio, started once per scenario in the
+                             scenario's directory. {workspace} in the command is that
+                             directory, and {cwd} is the one gauntlet was started in
 
-run options:
+what the target is given:
+  --structured               send each probe as a parsed call, for a target that never
+                             reads raw model text. --mcp always does
+  --tool <ours>=<theirs>     with --mcp, the server's name for read_file or write_file
+
+which scenarios run:
   --scenario <id>            run only this scenario. Repeat it, or separate ids with commas
   --category <name>          run only this category. Repeat it, or separate names with commas
-  --timeout <ms>             limit for one probe. The default is 10000
-  --name <label>             adapter name in the report
+  --tier <name>              run only safety or only robustness scenarios
+
+reports:
   --json                     print the report as one JSON object
   --verbose                  add the payloads and outputs of every scenario that did not pass
   --junit <file>             also write the results as JUnit XML
+  --sarif <file>             also write the results as SARIF 2.1.0
+  --sarif-location <path>    the file a SARIF viewer opens for a failure
+  --name <label>             adapter name in the report
+
+what fails the run:
+  --fail-on <tier>           any, safety, or robustness. The default is any
   --baseline <file>          compare with a recorded run. Exit 1 only on a regression
   --update-baseline <file>   record this run and exit 0
   --strict                   with --baseline, count a new failing scenario as a regression
+  --timeout <ms>             limit for one probe. The default is 10000
 
 exit codes:
-  0  every scenario passed or was not covered, or no scenario regressed
-  1  a scenario failed, errored, or regressed
+  0  no scenario that decides the run failed, errored, or regressed
+  1  a scenario that decides the run failed, errored, or regressed
   2  the command line, the adapter, or a file was wrong
 `;
 
@@ -62,15 +80,22 @@ const MAX_TIMEOUT_MS = 2_147_483_647;
 type RunMode =
   | { kind: "adapter"; spec: string }
   | { kind: "exec"; command: string }
-  | { kind: "http"; url: string };
+  | { kind: "http"; url: string }
+  | { kind: "mcp"; command: string };
 
 type RunFlags = {
   mode: RunMode;
   scenarios: readonly string[];
   categories: readonly string[];
+  tiers: readonly Tier[];
+  failOn: Tier | "any";
+  structured: boolean;
+  toolNames: ReadonlyMap<string, string>;
   json: boolean;
   verbose: boolean;
   junit: string | undefined;
+  sarif: string | undefined;
+  sarifLocation: string | undefined;
   timeoutMs: number;
   name: string | undefined;
   baseline: string | undefined;
@@ -116,7 +141,11 @@ export async function runCli(
   }
   const adapter = await resolveRunAdapter(flags, stderr);
   if (!adapter) return 2;
-  const selected = selectScenarios(flags.scenarios, flags.categories);
+  const selected = selectScenarios(
+    flags.scenarios,
+    flags.categories,
+    flags.tiers,
+  );
   if ("error" in selected) {
     stderr.write(`${selected.error}\n`);
     return 2;
@@ -132,8 +161,10 @@ export async function runCli(
   }
   // --exec and --http enforce the limit themselves and kill what they
   // started. An in-process adapter gets the same limit from the runner.
-  const options: RunOptions =
-    flags.mode.kind === "adapter" ? { timeoutMs: flags.timeoutMs } : {};
+  const options: RunOptions = {
+    ...(flags.mode.kind === "adapter" ? { timeoutMs: flags.timeoutMs } : {}),
+    ...(flags.structured ? { structured: true } : {}),
+  };
   const results = await runAll(adapter, selected.scenarios, options);
   const version = gauntletVersion();
   const summary = recorded
@@ -168,6 +199,22 @@ export async function runCli(
       return 2;
     }
   }
+  if (flags.sarif !== undefined) {
+    const failure = writeReportFile(
+      flags.sarif,
+      formatSarif(
+        adapter.name,
+        version,
+        results,
+        scenarios,
+        flags.sarifLocation ?? adapterFile(flags.mode),
+      ),
+    );
+    if (failure !== undefined) {
+      stderr.write(`${failure}\n`);
+      return 2;
+    }
+  }
   if (flags.updateBaseline !== undefined) {
     const failure = writeBaseline(
       flags.updateBaseline,
@@ -181,11 +228,29 @@ export async function runCli(
     }
     return 0;
   }
-  if (summary) return summary.regressions.length > 0 ? 1 : 0;
+  // --fail-on names the tier that decides the exit code. The report still
+  // shows every scenario.
+  const decides = (result: { tier?: Tier }): boolean =>
+    flags.failOn === "any" || result.tier === flags.failOn;
+  if (summary) {
+    const regressed = new Set(summary.regressions);
+    return results.some((result) => regressed.has(result.id) && decides(result))
+      ? 1
+      : 0;
+  }
   const bad = results.some(
-    (result) => result.status === "fail" || result.status === "error",
+    (result) =>
+      decides(result) &&
+      (result.status === "fail" || result.status === "error"),
   );
   return bad ? 1 : 0;
+}
+
+// The file a SARIF viewer should open for a failure, when the target is one.
+function adapterFile(mode: RunMode): string | undefined {
+  return mode.kind === "adapter" && isAdapterPath(mode.spec)
+    ? mode.spec
+    : undefined;
 }
 
 function listCommand(
@@ -252,6 +317,13 @@ function parseRunFlags(
   let adapter: string | undefined;
   let exec: string | undefined;
   let http: string | undefined;
+  let mcp: string | undefined;
+  const tiers: Tier[] = [];
+  let failOn: Tier | "any" = "any";
+  let structured = false;
+  const toolNames = new Map<string, string>();
+  let sarif: string | undefined;
+  let sarifLocation: string | undefined;
   let timeoutMs = DEFAULT_TIMEOUT_MS;
   let name: string | undefined;
   const scenarioIds: string[] = [];
@@ -279,10 +351,20 @@ function parseRunFlags(
       verbose = true;
       continue;
     }
+    if (token === "--structured") {
+      structured = true;
+      continue;
+    }
     if (
       token === "--adapter" ||
       token === "--exec" ||
       token === "--http" ||
+      token === "--mcp" ||
+      token === "--tool" ||
+      token === "--tier" ||
+      token === "--fail-on" ||
+      token === "--sarif" ||
+      token === "--sarif-location" ||
       token === "--timeout" ||
       token === "--name" ||
       token === "--scenario" ||
@@ -307,7 +389,41 @@ function parseRunFlags(
       } else if (token === "--adapter") adapter = value;
       else if (token === "--exec") exec = value;
       else if (token === "--http") http = value;
-      else if (token === "--baseline") baseline = value;
+      else if (token === "--mcp") mcp = value;
+      else if (token === "--sarif") sarif = value;
+      else if (token === "--sarif-location") sarifLocation = value;
+      else if (token === "--tool") {
+        // read_file=read_text_file: what Gauntlet calls it, then what the
+        // server calls it.
+        const [from, to, ...rest] = value.split("=");
+        if (
+          (from !== "read_file" && from !== "write_file") ||
+          to === undefined ||
+          to.length === 0 ||
+          rest.length > 0
+        ) {
+          return {
+            error: `invalid --tool ${value}; use read_file=<name> or write_file=<name>`,
+          };
+        }
+        toolNames.set(from, to);
+      } else if (token === "--fail-on") {
+        if (value !== "any" && !isTier(value)) {
+          return {
+            error: `invalid --fail-on ${value}; one of any, safety, robustness`,
+          };
+        }
+        failOn = value;
+      } else if (token === "--tier") {
+        const names = splitList(value);
+        if (names.length === 0) return { error: "missing --tier value" };
+        for (const tier of names) {
+          if (!isTier(tier)) {
+            return { error: `unknown tier ${tier}; one of safety, robustness` };
+          }
+          tiers.push(tier);
+        }
+      } else if (token === "--baseline") baseline = value;
       else if (token === "--update-baseline") updateBaseline = value;
       else if (token === "--junit") junit = value;
       else {
@@ -323,14 +439,22 @@ function parseRunFlags(
     }
     return { error: `unknown argument ${token}` };
   }
-  const selected = [adapter, exec, http].filter(
+  const selected = [adapter, exec, http, mcp].filter(
     (item) => item !== undefined,
   ).length;
   if (selected === 0) {
-    return { error: "missing --adapter, --exec, or --http" };
+    return { error: "missing --adapter, --exec, --http, or --mcp" };
   }
   if (selected > 1) {
-    return { error: "--adapter, --exec, and --http are mutually exclusive" };
+    return {
+      error: "--adapter, --exec, --http, and --mcp are mutually exclusive",
+    };
+  }
+  if (toolNames.size > 0 && mcp === undefined) {
+    return { error: "--tool needs --mcp" };
+  }
+  if (sarifLocation !== undefined && sarif === undefined) {
+    return { error: "--sarif-location needs --sarif" };
   }
   if (baseline !== undefined && updateBaseline !== undefined) {
     return {
@@ -341,11 +465,11 @@ function parseRunFlags(
   // other scenario from the file, and they would come back as new.
   if (
     updateBaseline !== undefined &&
-    (scenarioIds.length > 0 || categories.length > 0)
+    (scenarioIds.length > 0 || categories.length > 0 || tiers.length > 0)
   ) {
     return {
       error:
-        "--update-baseline records every scenario; remove --scenario and --category",
+        "--update-baseline records every scenario; remove --scenario, --category, and --tier",
     };
   }
   if (http !== undefined && !isHttpUrl(http)) {
@@ -354,9 +478,16 @@ function parseRunFlags(
   const shared = {
     scenarios: scenarioIds,
     categories,
+    tiers,
+    failOn,
+    // An MCP server only ever receives parsed calls.
+    structured: structured || mcp !== undefined,
+    toolNames,
     json,
     verbose,
     junit,
+    sarif,
+    sarifLocation,
     timeoutMs,
     name,
     baseline,
@@ -369,8 +500,11 @@ function parseRunFlags(
   if (http !== undefined) {
     return { mode: { kind: "http", url: http }, ...shared };
   }
+  if (mcp !== undefined) {
+    return { mode: { kind: "mcp", command: mcp }, ...shared };
+  }
   if (adapter === undefined) {
-    return { error: "missing --adapter, --exec, or --http" };
+    return { error: "missing --adapter, --exec, --http, or --mcp" };
   }
   return { mode: { kind: "adapter", spec: adapter }, ...shared };
 }
@@ -393,9 +527,21 @@ async function resolveRunAdapter(
       flags.name ?? `http:${flags.mode.url}`,
     );
   }
+  if (flags.mode.kind === "mcp") {
+    return mcpAdapter(
+      flags.mode.command,
+      flags.timeoutMs,
+      flags.name ?? `mcp:${flags.mode.command}`,
+      flags.toolNames,
+    );
+  }
   const adapter = await resolveAdapter(flags.mode.spec, stderr);
   if (!adapter || flags.name === undefined) return adapter;
-  return { name: flags.name, run: (input) => adapter.run(input) };
+  return {
+    name: flags.name,
+    run: (input) => adapter.run(input),
+    close: () => adapter.close?.() ?? Promise.resolve(),
+  };
 }
 
 async function resolveAdapter(
@@ -513,6 +659,10 @@ function writeComparisonNotes(
   }
 }
 
+function isTier(value: string): value is Tier {
+  return value === "safety" || value === "robustness";
+}
+
 function isHttpUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -529,12 +679,13 @@ function splitList(value: string): string[] {
     .filter((item) => item.length > 0);
 }
 
-// Ids and categories add up. The report keeps the order of the full list.
+// Ids and categories add up. A tier narrows whatever they selected. The
+// report keeps the order of the full list.
 function selectScenarios(
   ids: readonly string[],
   categories: readonly string[],
+  tiers: readonly Tier[],
 ): { scenarios: readonly Scenario[] } | { error: string } {
-  if (ids.length === 0 && categories.length === 0) return { scenarios };
   for (const id of ids) {
     if (!scenarios.some((scenario) => scenario.id === id)) {
       return { error: `unknown scenario ${id}` };
@@ -548,10 +699,14 @@ function selectScenarios(
       };
     }
   }
+  const named = ids.length > 0 || categories.length > 0;
   return {
     scenarios: scenarios.filter(
       (scenario) =>
-        ids.includes(scenario.id) || categories.includes(scenario.category),
+        (!named ||
+          ids.includes(scenario.id) ||
+          categories.includes(scenario.category)) &&
+        (tiers.length === 0 || tiers.includes(scenario.tier)),
     ),
   };
 }

@@ -80,7 +80,7 @@ test("a filtered run cannot replace the baseline", async () => {
       ]);
       expect(result.code).toBe(2);
       expect(result.stderr).toBe(
-        "--update-baseline records every scenario; remove --scenario and --category\n",
+        "--update-baseline records every scenario; remove --scenario, --category, and --tier\n",
       );
     }
     expect(existsSync(file)).toBe(false);

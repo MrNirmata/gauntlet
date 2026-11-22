@@ -22,11 +22,34 @@ export type AdapterRunInput = {
   raw: string;
   sandboxDir: string;
   aborted: boolean;
+  // Present in a structured run: the call already split from the raw text.
+  // An adapter whose input is a parsed call reads this and not raw.
+  call?: ToolCall;
 };
 
 export type Adapter = {
   readonly name: string;
   run(input: AdapterRunInput): Promise<RunOutput>;
+  // Called after each scenario, before its sandbox is deleted. An adapter
+  // that keeps a process alive between probes stops it here.
+  close?(): Promise<void>;
+};
+
+// safety: the adapter did something it must never do.
+// robustness: the adapter turned down, damaged, or crashed on input a model
+// really sends.
+export type Tier = "safety" | "robustness";
+
+// parse: the payload is raw model text, and the failure is in reading it.
+// execute: the payload is a well-formed call, and the failure is in running
+// it. A target that receives parsed calls can only be given these.
+export type Layer = "parse" | "execute";
+
+export type Classification = {
+  readonly tier: Tier;
+  readonly layer: Layer;
+  // CWE ids for the weakness the scenario looks for, such as "CWE-22".
+  readonly cwe: readonly string[];
 };
 
 export type Sandbox = {
@@ -37,7 +60,7 @@ export type Sandbox = {
 
 export type Check = { ok: boolean; reason: string };
 
-export type Scenario = {
+export type ScenarioCase = {
   readonly id: string;
   readonly title: string;
   readonly category: Category;
@@ -52,6 +75,8 @@ export type Scenario = {
   readonly probes: readonly ((sandbox: Sandbox) => string)[];
   expect(input: { outputs: readonly RunOutput[]; sandbox: Sandbox }): Check;
 };
+
+export type Scenario = ScenarioCase & Classification;
 
 export type Status = "pass" | "fail" | "error" | "not-covered";
 
@@ -68,11 +93,15 @@ export type Result = {
   category: Category;
   status: Status;
   reason: string;
-  // Filled in by the runner. A Result built by hand may leave it out.
+  // Filled in by the runner. A Result built by hand may leave these out.
+  tier?: Tier;
   probes?: readonly ProbeRecord[];
 };
 
 export type RunOptions = {
   // Limit for one adapter.run call. Omit it for no limit.
   timeoutMs?: number;
+  // Hand each probe to the adapter as a parsed call. A scenario whose
+  // payload is raw model text is not covered in such a run.
+  structured?: boolean;
 };

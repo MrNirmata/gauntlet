@@ -1,5 +1,6 @@
 import { asRunOutput } from "./output.ts";
 import { createSandbox, deleteSandbox } from "./sandbox.ts";
+import { splitCall } from "./structured.ts";
 import type {
   Adapter,
   AdapterRunInput,
@@ -15,16 +16,25 @@ export async function runScenario(
   scenario: Scenario,
   options: RunOptions = {},
 ): Promise<Result> {
-  const sandbox = createSandbox();
   const probes: ProbeRecord[] = [];
   const finish = (status: Result["status"], reason: string): Result => ({
     id: scenario.id,
     title: scenario.title,
     category: scenario.category,
+    tier: scenario.tier,
     status,
     reason: oneLine(reason),
     probes,
   });
+  // A target that receives parsed calls cannot be asked how it reads text
+  // that is not one.
+  if (options.structured === true && scenario.layer === "parse") {
+    return finish(
+      "not-covered",
+      "the payload is raw model text, and this target receives parsed calls",
+    );
+  }
+  const sandbox = createSandbox();
   try {
     scenario.prepare?.(sandbox);
     const outputs: RunOutput[] = [];
@@ -34,7 +44,7 @@ export async function runScenario(
       try {
         output = await runProbe(
           adapter,
-          { raw, sandboxDir: sandbox.workspaceDir, aborted: scenario.aborted },
+          probeInput(raw, sandbox.workspaceDir, scenario, options),
           options.timeoutMs,
         );
       } catch (error) {
@@ -68,8 +78,29 @@ export async function runScenario(
   } catch (error) {
     return finish("error", errorMessage(error));
   } finally {
+    // The adapter lets go of the sandbox before the sandbox goes away.
+    try {
+      await adapter.close?.();
+    } catch {
+      // Stopping failed. The scenario's result stands.
+    }
     deleteSandbox(sandbox);
   }
+}
+
+function probeInput(
+  raw: string,
+  sandboxDir: string,
+  scenario: Scenario,
+  options: RunOptions,
+): AdapterRunInput {
+  const input = { raw, sandboxDir, aborted: scenario.aborted };
+  if (options.structured !== true) return input;
+  const split = splitCall(raw);
+  if (!split) {
+    throw new Error(`scenario ${scenario.id} has a payload that is not a call`);
+  }
+  return { ...input, call: split.call };
 }
 
 export async function runAll(

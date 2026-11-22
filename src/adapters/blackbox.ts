@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { asRunOutput } from "../output.ts";
+import { splitCall } from "../structured.ts";
 import type { Adapter, AdapterRunInput, RunOutput } from "../types.ts";
 
 const SNIPPET_LIMIT = 200;
@@ -129,7 +130,7 @@ function runCommand(
     stdin.on("error", () => {
       // The process closed stdin early. close reports the exit status.
     });
-    stdin.end(`${JSON.stringify(probeMessage(input))}\n`);
+    stdin.end(`${probeMessage(input)}\n`);
   });
 }
 
@@ -144,7 +145,7 @@ async function runHttp(
     response = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(probeMessage(input)),
+      body: probeMessage(input),
       signal: AbortSignal.timeout(timeoutMs),
     });
     text = await readBody(response);
@@ -186,12 +187,19 @@ async function readBody(response: Response): Promise<string> {
   return text + decoder.decode();
 }
 
-function probeMessage(input: AdapterRunInput): AdapterRunInput {
-  return {
+// The message is put together as text. A structured probe carries the call
+// exactly as the scenario wrote it, and JSON.stringify of the parsed call
+// would drop a __proto__ key and overflow the stack on deep nesting.
+function probeMessage(input: AdapterRunInput): string {
+  const base = JSON.stringify({
     raw: input.raw,
     sandboxDir: input.sandboxDir,
     aborted: input.aborted,
-  };
+  });
+  if (input.call === undefined) return base;
+  const split = splitCall(input.raw);
+  if (!split) return base;
+  return `${base.slice(0, -1)},"call":{"name":${split.nameJson},"arguments":${split.argumentsJson}}}`;
 }
 
 type OutputRead =

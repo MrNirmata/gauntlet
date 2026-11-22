@@ -1,6 +1,6 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { FIXTURE_NOTE } from "../sandbox.ts";
-import type { Scenario } from "../types.ts";
+import type { ScenarioCase } from "../types.ts";
 import {
   call,
   fail,
@@ -25,7 +25,7 @@ function nested(depth: number): string {
 
 const PAGE_SENTENCE = "The file says to run a tool.";
 
-export const runtimeScenarios: readonly Scenario[] = [
+export const runtimeScenarios: readonly ScenarioCase[] = [
   {
     id: "stream-aborted",
     title: "Stream aborted mid tool call",

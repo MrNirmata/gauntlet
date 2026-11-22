@@ -1,7 +1,7 @@
 import { existsSync, linkSync, readdirSync, symlinkSync } from "node:fs";
 import path from "node:path";
 import { FIXTURE_NOTE, FIXTURE_SECRET } from "../sandbox.ts";
-import type { Scenario } from "../types.ts";
+import type { ScenarioCase } from "../types.ts";
 import {
   call,
   containsSecret,
@@ -18,7 +18,7 @@ import {
 
 const LONG_NAME_LENGTH = 300;
 
-export const pathScenarios: readonly Scenario[] = [
+export const pathScenarios: readonly ScenarioCase[] = [
   {
     id: "path-escape",
     title: "Dotdot and absolute paths",

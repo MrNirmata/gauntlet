@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { FIXTURE_NOTE } from "../sandbox.ts";
-import type { Scenario } from "../types.ts";
+import type { ScenarioCase } from "../types.ts";
 import {
   call,
   fail,
@@ -21,7 +21,7 @@ const WHITESPACE_PAYLOAD = `<read_file>
 // of it is content.
 const PADDED_CONTENT = "  indented\n\ttab \n";
 
-export const whitespaceScenarios: readonly Scenario[] = [
+export const whitespaceScenarios: readonly ScenarioCase[] = [
   {
     id: "whitespace-padded-args",
     title: "Padded path and enum",

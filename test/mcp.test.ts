@@ -1,0 +1,338 @@
+import { spawnSync } from "node:child_process";
+import { Writable } from "node:stream";
+import { expect, test } from "vitest";
+import { runCli } from "../src/cli.ts";
+import { CLASSIFICATION } from "../src/scenarios/classify.ts";
+import { scenarios } from "../src/scenarios/index.ts";
+import { splitCall } from "../src/structured.ts";
+
+type Row = { id: string; status: string; reason: string };
+
+async function run(
+  argv: readonly string[],
+): Promise<{ code: number; rows: Row[]; stdout: string; stderr: string }> {
+  const stdout = memoryStream();
+  const stderr = memoryStream();
+  const code = await runCli(argv, stdout.stream, stderr.stream);
+  let rows: Row[] = [];
+  try {
+    rows = (JSON.parse(stdout.text()) as { scenarios: Row[] }).scenarios;
+  } catch {
+    // Not a JSON report.
+  }
+  return { code, rows, stdout: stdout.text(), stderr: stderr.text() };
+}
+
+function memoryStream(): { stream: Writable; text: () => string } {
+  let body = "";
+  const stream = new Writable({
+    write(chunk, _encoding, callback) {
+      body += String(chunk);
+      callback();
+    },
+  });
+  return { stream, text: () => body };
+}
+
+const REFERENCE = `"${process.execPath}" {cwd}/test/fixtures/mcp-reference.mjs`;
+const ODD = `"${process.execPath}" {cwd}/test/fixtures/mcp-odd.mjs`;
+
+function mcp(
+  command: string,
+  ...rest: string[]
+): Promise<Awaited<ReturnType<typeof run>>> {
+  return run(["run", "--mcp", command, "--json", ...rest]);
+}
+
+const executeIds = scenarios
+  .filter((item) => item.layer === "execute" && !item.aborted)
+  .map((item) => item.id);
+
+test("every scenario is classified, and nothing else is", () => {
+  expect(Object.keys(CLASSIFICATION).sort()).toEqual(
+    scenarios.map((item) => item.id).sort(),
+  );
+  for (const item of scenarios) {
+    for (const id of item.cwe) expect(id, item.id).toMatch(/^CWE-\d+$/);
+  }
+});
+
+test("an execute scenario sends well-formed calls, and they split", () => {
+  const sandbox = { rootDir: "/r", workspaceDir: "/r/w", outsideFile: "/r/o" };
+  for (const item of scenarios) {
+    if (item.layer !== "execute") continue;
+    for (const probe of item.probes) {
+      const raw = probe(sandbox);
+      const split = splitCall(raw);
+      expect(split, `${item.id}: ${raw.slice(0, 60)}`).toBeDefined();
+      expect(
+        `{"name":${split?.nameJson},"arguments":${split?.argumentsJson}}`,
+      ).toBe(raw);
+    }
+  }
+  expect(
+    splitCall('{"name":"read_file","arguments":{"path":"a"}'),
+  ).toBeUndefined();
+  expect(splitCall("<read_file></read_file>")).toBeUndefined();
+  const proto = splitCall(
+    '{"name":"w","arguments":{"__proto__":{"path":"x"}}}',
+  );
+  expect(Object.keys(proto?.call.arguments ?? {})).toEqual(["__proto__"]);
+});
+
+test("a hardened MCP server passes every scenario it can be given", async () => {
+  const result = await mcp(`${REFERENCE} hardened {workspace}`);
+  expect(result.stderr).toBe("");
+  expect(result.code).toBe(0);
+  expect(result.rows.map((row) => row.id)).toEqual(
+    scenarios.map((item) => item.id),
+  );
+  for (const row of result.rows) {
+    const expected = executeIds.includes(row.id) ? "pass" : "not-covered";
+    expect(row.status, `${row.id}: ${row.reason}`).toBe(expected);
+  }
+  const reasons = new Map(result.rows.map((row) => [row.id, row.reason]));
+  expect(reasons.get("truncated-json")).toBe(
+    "the payload is raw model text, and this target receives parsed calls",
+  );
+  expect(reasons.get("stream-aborted")).toBe(
+    "the client drops an aborted call before a server sees it",
+  );
+});
+
+test("a naive MCP server fails the safety scenarios", async () => {
+  const result = await mcp(`${REFERENCE} naive {workspace}`);
+  expect(result.code).toBe(1);
+  const status = new Map(result.rows.map((row) => [row.id, row.status]));
+  for (const id of [
+    "proto-key-arguments",
+    "inherited-tool-name",
+    "unicode-trimmed-path",
+    "path-escape",
+    "path-escape-write",
+    "path-symlink-write",
+    "path-hardlink-write",
+    "prompt-injection-result",
+  ]) {
+    expect(status.get(id), id).toBe("fail");
+  }
+  expect(status.get("content-whitespace-kept")).toBe("pass");
+  // Every failure is a safety one, so a run that gates on robustness passes.
+  const lenient = await mcp(
+    `${REFERENCE} naive {workspace}`,
+    "--fail-on",
+    "robustness",
+  );
+  expect(lenient.code).toBe(0);
+});
+
+test("a server with its own tool names needs --tool", async () => {
+  const renamed = `${REFERENCE} hardened {workspace} renamed`;
+  const plain = await mcp(
+    renamed,
+    "--scenario",
+    "path-escape,inherited-tool-name",
+  );
+  expect(plain.rows).toEqual([
+    {
+      id: "inherited-tool-name",
+      category: "json",
+      status: "pass",
+      reason: "refused names that are not tools",
+    },
+    {
+      id: "path-escape",
+      category: "path",
+      status: "not-covered",
+      reason: "the server has no tool named read_file",
+    },
+  ]);
+  const mapped = await mcp(
+    renamed,
+    "--tool",
+    "read_file=read_text_file",
+    "--tool",
+    "write_file=write_text_file",
+  );
+  expect(mapped.code).toBe(0);
+  for (const row of mapped.rows) {
+    if (executeIds.includes(row.id)) {
+      expect(row.status, `${row.id}: ${row.reason}`).toBe("pass");
+    }
+  }
+});
+
+test("--tool is checked before anything runs", async () => {
+  const cases: [string[], string][] = [
+    [
+      ["--adapter", "reference-hardened", "--tool", "read_file=x"],
+      "--tool needs --mcp\n",
+    ],
+    [
+      ["--mcp", "true", "--tool", "delete_file=x"],
+      "invalid --tool delete_file=x; use read_file=<name> or write_file=<name>\n",
+    ],
+    [
+      ["--mcp", "true", "--tool", "read_file="],
+      "invalid --tool read_file=; use read_file=<name> or write_file=<name>\n",
+    ],
+    [
+      ["--mcp", "true", "--adapter", "reference-naive"],
+      "--adapter, --exec, --http, and --mcp are mutually exclusive\n",
+    ],
+  ];
+  for (const [argv, message] of cases) {
+    const result = await run(["run", ...argv]);
+    expect(result.code, argv.join(" ")).toBe(2);
+    expect(result.stderr).toBe(message);
+  }
+});
+
+test("a server that prints a banner and asks the client things still works", async () => {
+  const result = await mcp(`${ODD} banner`, "--scenario", "deep-nesting");
+  expect(result.rows).toMatchObject([
+    {
+      status: "pass",
+      reason: "returned for 2000 and 10000 levels of nesting",
+    },
+  ]);
+});
+
+test("a server that crashes, hangs, or does not start is an error", async () => {
+  const crash = await mcp(`${ODD} crash`, "--scenario", "deep-nesting");
+  expect(crash.code).toBe(1);
+  expect(crash.rows).toMatchObject([
+    {
+      status: "error",
+      reason:
+        "mcp server exited 3: RangeError: Maximum call stack size exceeded",
+    },
+  ]);
+  const started = Date.now();
+  const hang = await mcp(
+    `${ODD} hang`,
+    "--scenario",
+    "deep-nesting",
+    "--timeout",
+    "300",
+  );
+  expect(Date.now() - started).toBeLessThan(5000);
+  expect(hang.rows).toMatchObject([
+    { status: "error", reason: "mcp tools/call timed out after 300ms" },
+  ]);
+  const missing = await mcp(
+    `${ODD} no-start`,
+    "--scenario",
+    "path-escape,deep-nesting",
+  );
+  expect(missing.rows).toMatchObject([
+    {
+      status: "error",
+      reason: "mcp server exited 4: cannot open the allowed directory",
+    },
+    {
+      status: "error",
+      reason: "mcp server exited 4: cannot open the allowed directory",
+    },
+  ]);
+  const gone = await mcp("exit 0", "--scenario", "deep-nesting");
+  expect(gone.rows).toMatchObject([
+    { status: "error", reason: "mcp server exited 0" },
+  ]);
+});
+
+test("a JSON-RPC error is a refusal, and its first line is the reason", async () => {
+  const result = await run([
+    "run",
+    "--mcp",
+    `${ODD} rpc-error`,
+    "--scenario",
+    "path-escape",
+    "--json",
+    "--verbose",
+  ]);
+  const report = JSON.parse(result.stdout) as {
+    scenarios: {
+      status: string;
+      tier: string;
+      probes: { outcome: unknown }[];
+    }[];
+  };
+  expect(report.scenarios[0]?.status).toBe("pass");
+  expect(report.scenarios[0]?.tier).toBe("safety");
+  expect(report.scenarios[0]?.probes[0]?.outcome).toEqual({
+    status: "refused",
+    reason: "Invalid arguments",
+  });
+});
+
+test("tools are read across pages, and a missing one is not covered", async () => {
+  const result = await mcp(
+    `${ODD} paged`,
+    "--scenario",
+    "path-escape-write,deep-nesting",
+  );
+  expect(result.rows).toMatchObject([
+    {
+      id: "path-escape-write",
+      status: "not-covered",
+      reason: "the server has no tool named write_file",
+    },
+    { id: "deep-nesting", status: "pass" },
+  ]);
+});
+
+test("no server is left running after a run", async () => {
+  await mcp(
+    `${ODD} hang`,
+    "--scenario",
+    "deep-nesting,path-escape",
+    "--timeout",
+    "300",
+  );
+  await mcp(`${REFERENCE} hardened {workspace}`, "--category", "unicode");
+  const alive = (): string[] =>
+    spawnSync("ps", ["-ax", "-o", "command="], { encoding: "utf8" })
+      .stdout.split("\n")
+      // A server, or the sh that started one. A search of every command
+      // line would also find a shell or an editor showing this file's text.
+      .filter(
+        (line) =>
+          /fixtures\/mcp-(odd|reference)\.mjs/.test(line) &&
+          (line.startsWith(process.execPath) || /^(\/bin\/)?sh -c /.test(line)),
+      );
+  const deadline = Date.now() + 3000;
+  while (alive().length > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  expect(alive()).toEqual([]);
+});
+
+test("--structured gives a black-box adapter the call as it was written", async () => {
+  const command = `"${process.execPath}" test/fixtures/exec-structured.mjs`;
+  const structured = await run([
+    "run",
+    "--exec",
+    command,
+    "--structured",
+    "--json",
+  ]);
+  expect(structured.stderr).toBe("");
+  expect(structured.code).toBe(0);
+  for (const row of structured.rows) {
+    const item = scenarios.find((scenario) => scenario.id === row.id);
+    const expected = item?.layer === "execute" ? "pass" : "not-covered";
+    expect(row.status, `${row.id}: ${row.reason}`).toBe(expected);
+  }
+  const raw = await run([
+    "run",
+    "--exec",
+    command,
+    "--scenario",
+    "path-escape",
+    "--json",
+  ]);
+  expect(raw.rows).toMatchObject([
+    { status: "not-covered", reason: "no call in the probe" },
+  ]);
+});
