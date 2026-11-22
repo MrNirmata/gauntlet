@@ -39,7 +39,7 @@ function asToolCall(value: unknown): ToolCall | undefined {
 }
 
 // Arguments are data. A module adapter can hand back a BigInt, a function,
-// or an object that contains itself, and a report cannot print those. The
+// NaN, or an object that contains itself, and a report cannot print those. The
 // walk uses a list, so arguments 10000 levels deep do not use the stack, and
 // it stops at a budget, so a value that contains itself ends.
 const MAX_ARGUMENT_NODES = 200_000;
@@ -54,7 +54,12 @@ function isJsonValue(root: unknown): boolean {
     // JSON.stringify drops an undefined property, so it prints.
     if (value === null || value === undefined) continue;
     const kind = typeof value;
-    if (kind === "string" || kind === "boolean" || kind === "number") continue;
+    if (kind === "string" || kind === "boolean") continue;
+    // JSON has no NaN and no Infinity. A report would print them as null.
+    if (kind === "number") {
+      if (!Number.isFinite(value)) return false;
+      continue;
+    }
     if (kind !== "object") return false;
     if (Array.isArray(value)) {
       for (const item of value) pending.push(item);

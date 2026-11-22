@@ -529,6 +529,18 @@ test.skipIf(python3.status !== 0)(
       "hello\n",
     );
     expect(readdirSync(workspace).sort()).toEqual(["notes.txt", "sub"]);
+    // A trailing comma after a string, in an array and in an object, with
+    // and without padding around it, is repaired.
+    for (const tail of [
+      '"t":["a",],',
+      '"t":["a" , ] , ',
+      '"t":[{"k":"v",},"s",]',
+    ]) {
+      const reply = pythonHardened({
+        raw: `{"name":"read_file","arguments":{"path":"notes.txt",${tail}}}`,
+      });
+      expect(reply.output, tail).toMatchObject({ status: "executed" });
+    }
     writeFileSync(path.join(workspace, "mixed.txt"), "a\r\nb\rc");
     expect(
       pythonHardened({
@@ -544,5 +556,26 @@ test.skipIf(python3.status !== 0)(
         raw: '{"name":"read_file","arguments":{"path":"bin.dat"}}',
       }).output,
     ).toMatchObject({ status: "executed", result: "A\ufffdB" });
+  },
+);
+
+test.skipIf(python3.status !== 0)(
+  "the naive python example does not empty a file it then refuses to write",
+  () => {
+    const lone = `${String.fromCharCode(0x5c)}ud800`;
+    const child = spawnSync("python3", ["examples/python-adapter.py"], {
+      input: JSON.stringify({
+        raw: `{"name":"write_file","arguments":{"path":"notes.txt","content":"A${lone}B"}}`,
+        sandboxDir: workspace,
+        aborted: false,
+      }),
+      encoding: "utf8",
+      timeout: 20_000,
+    });
+    expect(child.status, child.stderr).toBe(0);
+    expect(JSON.parse(child.stdout)).toMatchObject({ status: "refused" });
+    expect(readFileSync(path.join(workspace, "notes.txt"), "utf8")).toBe(
+      `hello${String.fromCharCode(10)}`,
+    );
   },
 );

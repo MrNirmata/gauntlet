@@ -113,9 +113,16 @@ function runCommand(
     child.on("error", (error) => {
       fail(withSnippet(`exec failed: ${firstLine(error.message)}`, stderr));
     });
+    // The probe owns everything the command started. When the command
+    // exits, what it left in the background goes with it, whether or not it
+    // still holds a pipe. The group id is the command's own pid, which the
+    // system has only just released.
+    //
     // close comes once the pipes are drained, which is the normal end. exit
-    // comes first, and after it the output gets a moment to arrive.
+    // comes first, and after it the output gets a moment to arrive. A
+    // grandchild that left the group can still hold a pipe past that moment.
     child.on("exit", (code, signal) => {
+      killChild(child);
       drain = setTimeout(() => finish(code, signal), EXIT_DRAIN_MS);
     });
     child.on("close", (code, signal) => finish(code, signal));

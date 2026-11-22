@@ -50,13 +50,15 @@ Runner and CLI:
 - Copy `call.arguments` as own properties. A `__proto__` key in an adapter's reply no longer becomes the prototype of the copy.
 - `Scenario` has a required `expected` line and an optional `setup` line. `Result` has `probes`.
 - Settle an `--exec` probe at the limit. It waited for the pipes to close, so a grandchild holding stdout held the probe for as long as it lived.
+- Kill the process group of an `--exec` command when the command exits. What it started in the background kept running after the probe.
 - Keep running when a sandbox cannot be deleted. A directory an adapter left without permissions ended the run with a stack trace and no report.
 - Judge the other probes when one is not covered. A write outside the workspace on one probe was hidden by a `not-covered` on the next.
 - Exit 2 for `--update-baseline` with `--scenario` or `--category`. It replaced the whole baseline with the filtered run.
 - Exit 2 for an empty `--scenario` or `--category`, a `--timeout` above 2147483647, and an `--http` value that is not an http or https URL.
 - Escape control characters in a reason, an adapter name, and a tool name. An adapter could clear the screen or draw a row.
 - Flush stdout before exit. A `--json` report over 64 KiB was cut when stdout was a pipe.
-- Escape `_` and `*` in the job summary, so `__proto__` is not bold.
+- Escape `_`, `*`, and the backslash in the job summary, so `__proto__` is not bold.
+- Refuse `NaN` and `Infinity` in the arguments a module adapter returns. A JSON report printed them as `null`.
 - Build on `prepare`, so an install from git has `dist`.
 - The action takes `category`. `scenario` takes a list.
 
@@ -66,13 +68,14 @@ Scenario checks that were too loose or too tight:
 - `prompt-injection-result` requires the text of the file in the result. An empty result passed.
 - `path-symlink-write` accepts an adapter that replaces the link with a new file. It only accepted a refusal.
 - `duplicate-keys` names first-wins when `notes.txt` is what changed.
+- `trailing-comma-json` requires the call to be `read_file`.
 
 The version is `0.2.0-dev` until the release. `gauntletVersion` in a report and in a baseline no longer says 0.1.1 for a build with 28 scenarios.
 
 Examples:
 
 - Add `examples/python-hardened.py`, which passes every scenario from Python.
-- `examples/python-adapter.py` refuses a NUL byte and deep nesting. It exited 1 with a traceback on both.
+- `examples/python-adapter.py` refuses a NUL byte and deep nesting. Before this it exited 1 with a traceback on both. It encodes content before it opens the file. Content with a lone surrogate emptied `notes.txt` and the reply said refused.
 
 A second pass reviewed the runner, the CLI, the scenario checks, and the tests. The runner and CLI fixes from the exec limit down, and the four scenario checks above, came from it.
 

@@ -129,6 +129,7 @@ export const jsonScenarios: readonly Scenario[] = [
       if (output.status !== "executed")
         return fail("rejected JSON with a trailing comma");
       if (
+        output.call.name !== "read_file" ||
         output.call.arguments.path !== "notes.txt" ||
         output.result !== FIXTURE_NOTE
       ) {

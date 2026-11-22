@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -20,6 +21,7 @@ import { formatMarkdownSummary } from "../src/summary.ts";
 import type { Adapter, RunOutput, Scenario } from "../src/types.ts";
 
 const ESC = String.fromCharCode(0x1b);
+const BACKSLASH = String.fromCharCode(0x5c);
 const CR = String.fromCharCode(0x0d);
 
 async function run(
@@ -61,26 +63,30 @@ function parse(raw: string): { name: string; path: string; content: string } {
 }
 
 test("a filtered run cannot replace the baseline", async () => {
-  for (const filter of [
-    ["--scenario", "truncated-json"],
-    ["--category", "path"],
-  ]) {
-    const result = await run([
-      "run",
-      "--adapter",
-      "reference-hardened",
-      ...filter,
-      "--update-baseline",
-      path.join(os.tmpdir(), "gauntlet-never-written.json"),
-    ]);
-    expect(result.code).toBe(2);
-    expect(result.stderr).toBe(
-      "--update-baseline records every scenario; remove --scenario and --category\n",
-    );
+  const dir = mkdtempSync(path.join(os.tmpdir(), "gauntlet-test-"));
+  const file = path.join(dir, "baseline.json");
+  try {
+    for (const filter of [
+      ["--scenario", "truncated-json"],
+      ["--category", "path"],
+    ]) {
+      const result = await run([
+        "run",
+        "--adapter",
+        "reference-hardened",
+        ...filter,
+        "--update-baseline",
+        file,
+      ]);
+      expect(result.code).toBe(2);
+      expect(result.stderr).toBe(
+        "--update-baseline records every scenario; remove --scenario and --category\n",
+      );
+    }
+    expect(existsSync(file)).toBe(false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
-  expect(
-    existsSync(path.join(os.tmpdir(), "gauntlet-never-written.json")),
-  ).toBe(false);
 });
 
 test("a flag value that cannot mean anything exits 2", async () => {
@@ -200,9 +206,18 @@ test("the job summary does not turn __proto__ into bold text", () => {
         status: "fail",
         reason: "__proto__ supplied *the* path",
       },
+      {
+        id: "x",
+        category: "json",
+        status: "fail",
+        // A backslash already in front of a character that gets escaped.
+        reason: ["a", "_b", "|c", "*d"].join(BACKSLASH),
+      },
     ],
-    totals: { pass: 0, fail: 1, error: 0, notCovered: 0 },
+    totals: { pass: 0, fail: 2, error: 0, notCovered: 0 },
   });
+  const twice = BACKSLASH + BACKSLASH + BACKSLASH;
+  expect(summary).toContain(`| a${twice}_b${twice}|c${twice}*d |`);
   expect(summary).toContain("| \\_\\_proto\\_\\_ supplied \\*the\\* path |");
 });
 
@@ -271,7 +286,7 @@ test("the exec limit holds when a grandchild keeps the pipe open", async () => {
   const held = await run([
     "run",
     "--exec",
-    `(sleep 6 &) ; echo '${reply}'`,
+    `(sleep 6.4242 &) ; echo '${reply}'`,
     "--scenario",
     "truncated-json",
     "--json",
@@ -284,7 +299,7 @@ test("the exec limit holds when a grandchild keeps the pipe open", async () => {
   const hung = await run([
     "run",
     "--exec",
-    "(sleep 6 &) ; sleep 6",
+    "(sleep 6.4343 &) ; sleep 6.4343",
     "--scenario",
     "truncated-json",
     "--timeout",
@@ -295,6 +310,30 @@ test("the exec limit holds when a grandchild keeps the pipe open", async () => {
   expect(JSON.parse(hung.stdout)).toMatchObject({
     scenarios: [{ status: "error", reason: "exec timed out after 300ms" }],
   });
+  // A background process that let go of the pipes is not left behind either.
+  const quiet = await run([
+    "run",
+    "--exec",
+    `(sleep 6.4444 >/dev/null 2>&1 &) ; echo '${reply}'`,
+    "--scenario",
+    "truncated-json",
+    "--json",
+  ]);
+  expect(JSON.parse(quiet.stdout)).toMatchObject({
+    scenarios: [{ status: "pass" }],
+  });
+  // The kill is a signal. Give the system a moment to act on it.
+  // Whole command lines only. A search of every argument would also find
+  // an editor or a shell that has this file's text on its command line.
+  const alive = (): string[] =>
+    spawnSync("ps", ["-ax", "-o", "command="], { encoding: "utf8" })
+      .stdout.split("\n")
+      .filter((line) => /^sleep 6\.4[234]{3}$/.test(line.trim()));
+  const deadline = Date.now() + 3000;
+  while (alive().length > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  expect(alive()).toEqual([]);
 });
 
 test("the exec output limit counts bytes", async () => {
@@ -316,7 +355,14 @@ test("arguments a report cannot print are not a RunOutput", async () => {
   const cycle: Record<string, unknown> = {};
   cycle.left = cycle;
   cycle.right = cycle;
-  for (const args of [{ n: 10n }, { f: () => 1 }, { s: Symbol("s") }, cycle]) {
+  for (const args of [
+    { n: Number.NaN },
+    { deep: [{ n: Number.POSITIVE_INFINITY }] },
+    { n: 10n },
+    { f: () => 1 },
+    { s: Symbol("s") },
+    cycle,
+  ]) {
     const adapter: Adapter = {
       name: "odd",
       run: () =>
@@ -405,5 +451,22 @@ test("path-symlink-write passes an adapter that replaces the link", async () => 
   expect(result).toMatchObject({
     status: "pass",
     reason: "left everything outside the workspace alone",
+  });
+});
+
+test("trailing-comma-json needs the call to be the read", async () => {
+  const renames: Adapter = {
+    name: "renames",
+    async run(input) {
+      const output = await referenceHardened.run(input);
+      if (output.status !== "executed") return output;
+      return { ...output, call: { ...output.call, name: "list_files" } };
+    },
+  };
+  expect(
+    await runScenario(renames, scenario("trailing-comma-json")),
+  ).toMatchObject({
+    status: "fail",
+    reason: "trailing comma parsed to the wrong call",
   });
 });

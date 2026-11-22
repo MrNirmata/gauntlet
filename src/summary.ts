@@ -97,14 +97,19 @@ function codeSpan(value: string): string {
 }
 
 function cell(value: string): string {
-  return value
-    .replaceAll("\r\n", " ")
-    .replaceAll("\n", " ")
-    .replaceAll("\r", " ")
-    .replaceAll("|", "\\|")
-    .replaceAll("`", "'")
-    .replaceAll("_", "\\_")
-    .replaceAll("*", "\\*");
+  return (
+    value
+      .replaceAll("\r\n", " ")
+      .replaceAll("\n", " ")
+      .replaceAll("\r", " ")
+      // Backslash first. One already in the text would otherwise pair with
+      // the next character's own escape and leave that character active.
+      .replaceAll("\\", "\\\\")
+      .replaceAll("|", "\\|")
+      .replaceAll("`", "'")
+      .replaceAll("_", "\\_")
+      .replaceAll("*", "\\*")
+  );
 }
 
 function parseReport(json: unknown): Report {

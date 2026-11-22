@@ -11,6 +11,7 @@ import { Writable } from "node:stream";
 import { expect, test } from "vitest";
 import { referenceNaive } from "../src/adapters/reference.ts";
 import { runCli } from "../src/cli.ts";
+import { scenarios } from "../src/scenarios/index.ts";
 import type { AdapterRunInput } from "../src/types.ts";
 
 const python3 = spawnSync("python3", ["--version"], { encoding: "utf8" });
@@ -266,6 +267,9 @@ test.skipIf(python3.status !== 0)(
     expect(result.stderr).toBe("");
     expect(result.code).toBe(0);
     const report = readRun(result.stdout);
+    expect(report.scenarios.map((row) => row.id)).toEqual(
+      scenarios.map((scenario) => scenario.id),
+    );
     for (const row of report.scenarios) {
       expect(row.status, `${row.id}: ${row.reason}`).toBe("pass");
     }

@@ -69,8 +69,11 @@ def execute(raw: str, sandbox: str) -> dict:
     content = arguments.get("content")
     if not isinstance(content, str):
         return {"status": "refused", "reason": "missing argument"}
-    with open(target, "w", encoding="utf-8") as handle:
-        handle.write(content)
+    # Encode first. open(..., "w") empties the file, and content UTF-8 cannot
+    # hold would fail after that, with the reply saying the call was refused.
+    data = content.encode("utf-8")
+    with open(target, "wb") as handle:
+        handle.write(data)
     return {"status": "executed", "call": call, "result": "wrote"}
 
 

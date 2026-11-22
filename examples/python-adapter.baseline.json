@@ -25,7 +25,7 @@
     "truncated-json": "pass",
     "truncated-xml": "pass",
     "unicode-bidi-path": "fail",
-    "unicode-lone-surrogate": "fail",
+    "unicode-lone-surrogate": "pass",
     "unicode-trimmed-path": "fail",
     "unicode-zero-width-path": "fail",
     "whitespace-padded-args": "fail",
