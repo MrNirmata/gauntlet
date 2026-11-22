@@ -115,11 +115,14 @@ gauntlet run --mcp "node {cwd}/dist/server.js {workspace}"
 
 The server is started once per scenario, in that scenario's workspace. `{workspace}` in the command is the path of that directory. `{cwd}` is the directory you started Gauntlet in. The server does not run there: a probe has a relative path, and a server that resolved it against your project would be reading and writing your project.
 
-The server needs a tool that reads a file and a tool that writes one, each taking `path`, and the write also `content`. `--tool` gives the server's names for them.
+The server needs a tool that reads a file and a tool that writes one. `--tool` gives the server's names for the tools, and `--arg` its names for the two arguments.
 
 ```
 gauntlet run --mcp "node {cwd}/server.js {workspace}" --tool read_file=read_text_file
+gauntlet run --mcp "python3 {cwd}/server.py" --tool write_file=save --arg path=file_path --arg content=text
 ```
+
+Gauntlet starts the server once before the run. A command that cannot start, or a server with neither tool, exits 2 with one message that lists the tools the server does have. A server with only one of the two runs, and the scenarios that need the other are `not-covered`.
 
 A JSON-RPC error and a result with `isError` are both a refusal. A server that exits, or does not answer within `--timeout`, is an error for that scenario.
 
@@ -200,7 +203,7 @@ jobs:
           baseline: gauntlet-baseline.json
 ```
 
-Set exactly one of `adapter`, `exec`, `http`, or `mcp`. `name`, `timeout`, `scenario`, `category`, `tier`, `fail-on`, `structured`, `tool`, `sarif`, `sarif-location`, `strict`, and `working-directory` are optional. `scenario` and `category` take comma-separated lists. `tool` takes `read_file=<name>,write_file=<name>`.
+Set exactly one of `adapter`, `exec`, `http`, or `mcp`. `name`, `timeout`, `scenario`, `category`, `tier`, `fail-on`, `structured`, `tool`, `arg`, `sarif`, `sarif-location`, `strict`, and `working-directory` are optional. `scenario` and `category` take comma-separated lists. `tool` takes `read_file=<name>,write_file=<name>`, and `arg` takes `path=<name>,content=<name>`.
 
 A job that gates on safety and sends the results to code scanning:
 
@@ -354,7 +357,6 @@ Gauntlet is a test harness. The sandbox is a temp directory, not a security boun
 ## Roadmap
 
 - More entries on the scoreboard: other MCP file servers, and agents through `--structured`. See [SCOREBOARD.md](SCOREBOARD.md).
-- A name map for MCP tool arguments. Today the tools must take `path` and `content`.
 - One config file that runs several targets, for a repository with more than one agent or server.
 - Adapters for a real XML tool-call parser and an OpenAI or Anthropic function-call JSON layer.
 - Windows.

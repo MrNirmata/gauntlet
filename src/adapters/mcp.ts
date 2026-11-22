@@ -1,6 +1,8 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { realpathSync } from "node:fs";
-import { splitCall } from "../structured.ts";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { renameTopLevelKeys, splitCall } from "../structured.ts";
 import type { Adapter, RunOutput, ToolCall } from "../types.ts";
 
 // The newest revision this client was written against. A server answers
@@ -48,6 +50,7 @@ export function mcpAdapter(
   timeoutMs: number,
   name: string,
   toolNames: ReadonlyMap<string, string>,
+  argumentNames: ReadonlyMap<string, string> = new Map(),
 ): Adapter {
   let session: Session | undefined;
   const stop = async (): Promise<void> => {
@@ -88,12 +91,30 @@ export function mcpAdapter(
         mapped === undefined ? split.nameJson : JSON.stringify(mapped);
       const reply = await session.request(
         "tools/call",
-        `{"name":${nameJson},"arguments":${split.argumentsJson}}`,
+        `{"name":${nameJson},"arguments":${renameTopLevelKeys(split.argumentsJson, argumentNames)}}`,
       );
       return toRunOutput(reply, split.call);
     },
     close: stop,
   };
+}
+
+// Starts the server once in an empty directory and returns the names of its
+// tools. A run asks this first, so a command that cannot start, or a server
+// whose tools have other names, is one clear message and not the same error
+// on every row.
+export async function listMcpTools(
+  command: string,
+  timeoutMs: number,
+): Promise<string[]> {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "gauntlet-mcp-"));
+  try {
+    const session = await startSession(command, dir, timeoutMs);
+    await session.stop();
+    return [...session.tools];
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+  }
 }
 
 function toRunOutput(reply: Reply, call: ToolCall): RunOutput {

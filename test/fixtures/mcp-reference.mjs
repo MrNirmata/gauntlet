@@ -1,16 +1,33 @@
 // A small MCP server over stdio for the tests. It answers initialize,
 // tools/list, and tools/call, and hands each call to a reference adapter.
 //
-//   node mcp-reference.mjs <naive|hardened> <workspace> [renamed]
+//   node mcp-reference.mjs <naive|hardened> <workspace> [renamed|renamed-args]
 //
-// With "renamed" it offers read_text_file and write_text_file.
+// With "renamed" it offers read_text_file and write_text_file. With
+// "renamed-args" those tools also take file_path and text.
 import { createInterface } from "node:readline";
 import { referenceHardened, referenceNaive } from "../../dist/index.js";
 
 const adapter =
   process.argv[2] === "naive" ? referenceNaive : referenceHardened;
 const workspace = process.argv[3] ?? process.cwd();
-const renamed = process.argv[4] === "renamed";
+const renamed = process.argv[4]?.startsWith("renamed") === true;
+const renamedArgs = process.argv[4] === "renamed-args";
+const argumentNames = { file_path: "path", text: "content" };
+
+// Own keys only, so a __proto__ key stays a key.
+function ourArguments(given) {
+  if (!renamedArgs || typeof given !== "object" || given === null) return given;
+  return Object.fromEntries(
+    Object.entries(given)
+      // A server that takes file_path does not know an argument called path.
+      .filter(([key]) => key !== "path" && key !== "content")
+      .map(([key, value]) => [
+        Object.hasOwn(argumentNames, key) ? argumentNames[key] : key,
+        value,
+      ]),
+  );
+}
 const names = renamed
   ? { read_text_file: "read_file", write_text_file: "write_file" }
   : { read_file: "read_file", write_file: "write_file" };
@@ -25,7 +42,10 @@ async function call(params) {
     : params.name;
   let raw;
   try {
-    raw = JSON.stringify({ name: ours, arguments: params.arguments });
+    raw = JSON.stringify({
+      name: ours,
+      arguments: ourArguments(params.arguments),
+    });
   } catch {
     return {
       content: [{ type: "text", text: "nesting too deep" }],

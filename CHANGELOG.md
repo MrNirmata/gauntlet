@@ -4,7 +4,7 @@
 
 Targets that never read raw model text:
 
-- Add `--mcp <command>`. Gauntlet starts an MCP server on stdio, once per scenario and in the scenario's workspace, and sends each probe as a `tools/call` request. `--tool` maps `read_file` and `write_file` to the server's names. No adapter is written.
+- Add `--mcp <command>`. Gauntlet starts an MCP server on stdio, once per scenario and in the scenario's workspace, and sends each probe as a `tools/call` request. `--tool` maps `read_file` and `write_file` to the server's names, and `--arg` maps `path` and `content`. No adapter is written. The server is started once before the run, and one that cannot start, or has neither tool, exits 2 with the names of the tools it does have.
 - Add `--structured` for `--adapter`, `--exec`, and `--http`. Each probe carries `call`, the call already split from the text.
 - An adapter may have `close()`, called after each scenario.
 
@@ -14,7 +14,7 @@ Tiers:
 - Add `--tier <name>` and `--fail-on <tier>`. The text report has a line for each tier.
 - A scenario whose payload is raw model text is `not-covered` in a structured run.
 - Add `--sarif <file>` and `--sarif-location <path>` for a SARIF 2.1.0 report with one rule per scenario.
-- The action takes `mcp`, `tool`, `structured`, `tier`, `fail-on`, `sarif`, and `sarif-location`.
+- The action takes `mcp`, `tool`, `arg`, `structured`, `tier`, `fail-on`, `sarif`, and `sarif-location`.
 - The scoreboard has the reference MCP filesystem server, run as the published package with no shim.
 
 New scenarios. The suite goes from 12 to 28. A baseline recorded before this lists them as new. They do not fail a `--baseline` run unless `--strict` is set.

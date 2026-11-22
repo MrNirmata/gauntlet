@@ -38,3 +38,61 @@ export function splitCall(raw: string): SplitCall | undefined {
     argumentsJson,
   };
 }
+
+// Renames keys of the outermost object in a JSON text, and leaves every
+// other character as it was. A server that calls the argument file_path
+// still gets the rest of the arguments exactly as the scenario wrote them.
+export function renameTopLevelKeys(
+  json: string,
+  names: ReadonlyMap<string, string>,
+): string {
+  if (names.size === 0) return json;
+  let out = "";
+  let depth = 0;
+  let keyNext = false;
+  let index = 0;
+  while (index < json.length) {
+    const char = json[index];
+    if (char === '"') {
+      const end = stringEnd(json, index);
+      const token = json.slice(index, end);
+      const mapped =
+        depth === 1 && keyNext ? names.get(decoded(token)) : undefined;
+      out += mapped === undefined ? token : JSON.stringify(mapped);
+      keyNext = false;
+      index = end;
+      continue;
+    }
+    if (char === "{" || char === "[") {
+      depth += 1;
+      keyNext = char === "{" && depth === 1;
+    } else if (char === "}" || char === "]") {
+      depth -= 1;
+    } else if (char === "," && depth === 1) {
+      keyNext = true;
+    }
+    out += char;
+    index += 1;
+  }
+  return out;
+}
+
+// The index just past the closing quote of the string that starts at start.
+function stringEnd(json: string, start: number): number {
+  let index = start + 1;
+  while (index < json.length) {
+    if (json[index] === "\\") index += 2;
+    else if (json[index] === '"') return index + 1;
+    else index += 1;
+  }
+  return json.length;
+}
+
+function decoded(token: string): string {
+  try {
+    const value: unknown = JSON.parse(token);
+    return typeof value === "string" ? value : "";
+  } catch {
+    return "";
+  }
+}

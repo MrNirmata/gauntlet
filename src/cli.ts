@@ -6,7 +6,7 @@ import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { execAdapter, httpAdapter } from "./adapters/blackbox.ts";
 import { adapters } from "./adapters/index.ts";
-import { mcpAdapter } from "./adapters/mcp.ts";
+import { listMcpTools, mcpAdapter } from "./adapters/mcp.ts";
 import type { BaselineComparison, BaselineData } from "./baseline.ts";
 import { compareBaseline, readBaseline, writeBaseline } from "./baseline.ts";
 import {
@@ -47,6 +47,7 @@ what the target is given:
   --structured               send each probe as a parsed call, for a target that never
                              reads raw model text. --mcp always does
   --tool <ours>=<theirs>     with --mcp, the server's name for read_file or write_file
+  --arg <ours>=<theirs>      with --mcp, the server's name for the path or content argument
 
 which scenarios run:
   --scenario <id>            run only this scenario. Repeat it, or separate ids with commas
@@ -91,6 +92,7 @@ type RunFlags = {
   failOn: Tier | "any";
   structured: boolean;
   toolNames: ReadonlyMap<string, string>;
+  argumentNames: ReadonlyMap<string, string>;
   json: boolean;
   verbose: boolean;
   junit: string | undefined;
@@ -138,6 +140,13 @@ export async function runCli(
   if ("error" in flags) {
     stderr.write(`${flags.error}\n`);
     return 2;
+  }
+  if (flags.mode.kind === "mcp") {
+    const problem = await checkMcpServer(flags.mode.command, flags, stderr);
+    if (problem !== undefined) {
+      stderr.write(`${problem}\n`);
+      return 2;
+    }
   }
   const adapter = await resolveRunAdapter(flags, stderr);
   if (!adapter) return 2;
@@ -246,6 +255,33 @@ export async function runCli(
   return bad ? 1 : 0;
 }
 
+// Starts the server once before the run. Returns what is wrong with it, or
+// undefined when at least one of the two tools is there.
+async function checkMcpServer(
+  command: string,
+  flags: RunFlags,
+  stderr: NodeJS.WritableStream,
+): Promise<string | undefined> {
+  let tools: string[];
+  try {
+    tools = await listMcpTools(command, flags.timeoutMs);
+  } catch (error) {
+    return `could not start the MCP server: ${errorLine(error)}`;
+  }
+  const read = flags.toolNames.get("read_file") ?? "read_file";
+  const write = flags.toolNames.get("write_file") ?? "write_file";
+  const missing = [read, write].filter((name) => !tools.includes(name));
+  if (missing.length === 0) return undefined;
+  const offered = tools.length > 0 ? tools.join(", ") : "none";
+  if (missing.length === 2) {
+    return `the MCP server has no tool named ${read} or ${write}. Its tools: ${offered}. Name the one that reads a file with --tool read_file=<name> and the one that writes with --tool write_file=<name>`;
+  }
+  stderr.write(
+    `note: the MCP server has no tool named ${missing[0]}. Its tools: ${offered}. Scenarios that need it are not covered\n`,
+  );
+  return undefined;
+}
+
 // The file a SARIF viewer should open for a failure, when the target is one.
 function adapterFile(mode: RunMode): string | undefined {
   return mode.kind === "adapter" && isAdapterPath(mode.spec)
@@ -322,6 +358,7 @@ function parseRunFlags(
   let failOn: Tier | "any" = "any";
   let structured = false;
   const toolNames = new Map<string, string>();
+  const argumentNames = new Map<string, string>();
   let sarif: string | undefined;
   let sarifLocation: string | undefined;
   let timeoutMs = DEFAULT_TIMEOUT_MS;
@@ -361,6 +398,7 @@ function parseRunFlags(
       token === "--http" ||
       token === "--mcp" ||
       token === "--tool" ||
+      token === "--arg" ||
       token === "--tier" ||
       token === "--fail-on" ||
       token === "--sarif" ||
@@ -407,6 +445,19 @@ function parseRunFlags(
           };
         }
         toolNames.set(from, to);
+      } else if (token === "--arg") {
+        const [from, to, ...rest] = value.split("=");
+        if (
+          (from !== "path" && from !== "content") ||
+          to === undefined ||
+          to.length === 0 ||
+          rest.length > 0
+        ) {
+          return {
+            error: `invalid --arg ${value}; use path=<name> or content=<name>`,
+          };
+        }
+        argumentNames.set(from, to);
       } else if (token === "--fail-on") {
         if (value !== "any" && !isTier(value)) {
           return {
@@ -453,6 +504,9 @@ function parseRunFlags(
   if (toolNames.size > 0 && mcp === undefined) {
     return { error: "--tool needs --mcp" };
   }
+  if (argumentNames.size > 0 && mcp === undefined) {
+    return { error: "--arg needs --mcp" };
+  }
   if (sarifLocation !== undefined && sarif === undefined) {
     return { error: "--sarif-location needs --sarif" };
   }
@@ -483,6 +537,7 @@ function parseRunFlags(
     // An MCP server only ever receives parsed calls.
     structured: structured || mcp !== undefined,
     toolNames,
+    argumentNames,
     json,
     verbose,
     junit,
@@ -533,6 +588,7 @@ async function resolveRunAdapter(
       flags.timeoutMs,
       flags.name ?? `mcp:${flags.mode.command}`,
       flags.toolNames,
+      flags.argumentNames,
     );
   }
   const adapter = await resolveAdapter(flags.mode.spec, stderr);

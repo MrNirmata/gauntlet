@@ -18,6 +18,9 @@ inputs:
   tool:
     description: With mcp, the server's names for the two tools, as read_file=<name>,write_file=<name>.
     required: false
+  arg:
+    description: With mcp, the server's names for the two arguments, as path=<name>,content=<name>.
+    required: false
   structured:
     description: When true, each probe is sent as a parsed call. mcp always does.
     required: false
@@ -111,6 +114,7 @@ runs:
         INPUT_CATEGORY: ${{ inputs.category }}
         INPUT_MCP: ${{ inputs.mcp }}
         INPUT_TOOL: ${{ inputs.tool }}
+        INPUT_ARG: ${{ inputs.arg }}
         INPUT_STRUCTURED: ${{ inputs.structured }}
         INPUT_TIER: ${{ inputs.tier }}
         INPUT_FAIL_ON: ${{ inputs.fail-on }}

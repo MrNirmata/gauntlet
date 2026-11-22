@@ -29,6 +29,12 @@ if [[ -n "${INPUT_TOOL:-}" ]]; then
     args+=(--tool "$pair")
   done
 fi
+if [[ -n "${INPUT_ARG:-}" ]]; then
+  IFS=',' read -r -a arg_pairs <<<"$INPUT_ARG"
+  for pair in "${arg_pairs[@]}"; do
+    args+=(--arg "$pair")
+  done
+fi
 if [[ "${INPUT_STRUCTURED:-}" == "true" ]]; then
   args+=(--structured)
 fi

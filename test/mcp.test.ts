@@ -4,7 +4,7 @@ import { expect, test } from "vitest";
 import { runCli } from "../src/cli.ts";
 import { CLASSIFICATION } from "../src/scenarios/classify.ts";
 import { scenarios } from "../src/scenarios/index.ts";
-import { splitCall } from "../src/structured.ts";
+import { renameTopLevelKeys, splitCall } from "../src/structured.ts";
 
 type Row = { id: string; status: string; reason: string };
 
@@ -126,27 +126,8 @@ test("a naive MCP server fails the safety scenarios", async () => {
   expect(lenient.code).toBe(0);
 });
 
-test("a server with its own tool names needs --tool", async () => {
+test("a server with its own tool names passes once they are mapped", async () => {
   const renamed = `${REFERENCE} hardened {workspace} renamed`;
-  const plain = await mcp(
-    renamed,
-    "--scenario",
-    "path-escape,inherited-tool-name",
-  );
-  expect(plain.rows).toEqual([
-    {
-      id: "inherited-tool-name",
-      category: "json",
-      status: "pass",
-      reason: "refused names that are not tools",
-    },
-    {
-      id: "path-escape",
-      category: "path",
-      status: "not-covered",
-      reason: "the server has no tool named read_file",
-    },
-  ]);
   const mapped = await mcp(
     renamed,
     "--tool",
@@ -220,25 +201,133 @@ test("a server that crashes, hangs, or does not start is an error", async () => 
   expect(hang.rows).toMatchObject([
     { status: "error", reason: "mcp tools/call timed out after 300ms" },
   ]);
-  const missing = await mcp(
-    `${ODD} no-start`,
-    "--scenario",
-    "path-escape,deep-nesting",
+});
+
+test("a server that cannot start ends the run before it begins", async () => {
+  const missing = await mcp(`${ODD} no-start`, "--scenario", "path-escape");
+  expect(missing.code).toBe(2);
+  expect(missing.stdout).toBe("");
+  expect(missing.stderr).toBe(
+    "could not start the MCP server: mcp server exited 4: cannot open the allowed directory\n",
   );
-  expect(missing.rows).toMatchObject([
+  const gone = await mcp("exit 0");
+  expect(gone.code).toBe(2);
+  expect(gone.stderr).toBe(
+    "could not start the MCP server: mcp server exited 0\n",
+  );
+  const silent = await mcp("sleep 30", "--timeout", "300");
+  expect(silent.code).toBe(2);
+  expect(silent.stderr).toBe(
+    "could not start the MCP server: mcp initialize timed out after 300ms\n",
+  );
+});
+
+test("a server whose tools have other names says so once", async () => {
+  const renamed = `${REFERENCE} hardened {workspace} renamed`;
+  const none = await mcp(renamed, "--scenario", "path-escape");
+  expect(none.code).toBe(2);
+  expect(none.stdout).toBe("");
+  expect(none.stderr).toBe(
+    "the MCP server has no tool named read_file or write_file. Its tools: read_text_file, write_text_file. Name the one that reads a file with --tool read_file=<name> and the one that writes with --tool write_file=<name>\n",
+  );
+  const half = await mcp(
+    renamed,
+    "--tool",
+    "read_file=read_text_file",
+    "--scenario",
+    "path-escape,path-escape-write",
+  );
+  expect(half.code).toBe(0);
+  expect(half.stderr).toBe(
+    "note: the MCP server has no tool named write_file. Its tools: read_text_file, write_text_file. Scenarios that need it are not covered\n",
+  );
+  expect(half.rows).toMatchObject([
+    { id: "path-escape", status: "pass" },
     {
-      status: "error",
-      reason: "mcp server exited 4: cannot open the allowed directory",
-    },
-    {
-      status: "error",
-      reason: "mcp server exited 4: cannot open the allowed directory",
+      id: "path-escape-write",
+      status: "not-covered",
+      reason: "the server has no tool named write_file",
     },
   ]);
-  const gone = await mcp("exit 0", "--scenario", "deep-nesting");
-  expect(gone.rows).toMatchObject([
-    { status: "error", reason: "mcp server exited 0" },
+});
+
+test("--arg renames the path and content arguments and nothing else", async () => {
+  const server = `${REFERENCE} hardened {workspace} renamed-args`;
+  const tools = [
+    "--tool",
+    "read_file=read_text_file",
+    "--tool",
+    "write_file=write_text_file",
+  ];
+  const mapped = await mcp(
+    server,
+    ...tools,
+    "--arg",
+    "path=file_path",
+    "--arg",
+    "content=text",
+  );
+  expect(mapped.stderr).toBe("");
+  expect(mapped.code).toBe(0);
+  for (const row of mapped.rows) {
+    if (executeIds.includes(row.id)) {
+      expect(row.status, `${row.id}: ${row.reason}`).toBe("pass");
+    }
+  }
+  // Without the map the server never sees a path. A scenario that needs the
+  // call to run then fails, and that is the sign the names are wrong.
+  const plain = await mcp(
+    server,
+    ...tools,
+    "--scenario",
+    "content-whitespace-kept",
+  );
+  expect(plain.rows).toMatchObject([
+    { status: "fail", reason: "did not write padded.txt" },
   ]);
+  const cases: [string[], string][] = [
+    [
+      ["--mcp", "true", "--arg", "encoding=x"],
+      "invalid --arg encoding=x; use path=<name> or content=<name>\n",
+    ],
+    [
+      ["--adapter", "reference-naive", "--arg", "path=x"],
+      "--arg needs --mcp\n",
+    ],
+  ];
+  for (const [argv, message] of cases) {
+    const result = await run(["run", ...argv]);
+    expect(result.code, argv.join(" ")).toBe(2);
+    expect(result.stderr).toBe(message);
+  }
+});
+
+test("renameTopLevelKeys touches the outermost keys only", () => {
+  const names = new Map([
+    ["path", "file_path"],
+    ["content", "text"],
+  ]);
+  const cases: [string, string][] = [
+    ['{"path":"a","content":"b"}', '{"file_path":"a","text":"b"}'],
+    [
+      '{ "path" : "path" , "x" : {"path":1} }',
+      '{ "file_path" : "path" , "x" : {"path":1} }',
+    ],
+    [
+      '{"\\u0070ath":"a","tags":["path",{"content":"c"}]}',
+      '{"file_path":"a","tags":["path",{"content":"c"}]}',
+    ],
+    ['{"__proto__":{"path":"x"}}', '{"__proto__":{"path":"x"}}'],
+    [
+      '{"content":"say \\"path\\":","path":"p"}',
+      '{"text":"say \\"path\\":","file_path":"p"}',
+    ],
+    ["{}", "{}"],
+  ];
+  for (const [given, expected] of cases) {
+    expect(renameTopLevelKeys(given, names), given).toBe(expected);
+  }
+  expect(renameTopLevelKeys('{"path":"a"}', new Map())).toBe('{"path":"a"}');
 });
 
 test("a JSON-RPC error is a refusal, and its first line is the reason", async () => {
