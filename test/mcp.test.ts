@@ -465,20 +465,30 @@ test("no server is left running after a run", async () => {
   expect(await noServerLeft()).toEqual([]);
 });
 
-test("a close during a call does not leave a server behind", async () => {
+function readCall(dir: string) {
+  const raw = '{"name":"read_file","arguments":{"path":"notes.txt"}}';
+  const call = splitCall(raw)?.call;
+  if (!call) throw new Error("no call");
+  return { raw, sandboxDir: dir, aborted: false, call };
+}
+
+function outcome(running: Promise<unknown>): Promise<string> {
+  return running.then(
+    () => "returned",
+    (error: Error) => error.message,
+  );
+}
+
+test("a close while the server for a scenario is starting leaves none behind", async () => {
   const slow = `sleep 0.6; exec ${ODD.replaceAll("{cwd}", process.cwd())} stubborn`;
   const adapter = mcpAdapter(slow, 10_000, "slow", new Map());
   const dir = mkdtempSync(path.join(os.tmpdir(), "gauntlet-test-"));
   try {
-    const raw = '{"name":"read_file","arguments":{"path":"notes.txt"}}';
-    const call = splitCall(raw)?.call;
-    if (!call) throw new Error("no call");
-    const running = adapter.run({ raw, sandboxDir: dir, aborted: false, call });
-    const failed = running.then(
-      () => "returned",
-      (error: Error) => error.message,
-    );
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // The control call first, so the close below lands on the start of the
+    // scenario's own server and not on the control call.
+    expect((await adapter.check()).problem).toBeUndefined();
+    const failed = outcome(adapter.run(readCall(dir)));
+    await new Promise((resolve) => setTimeout(resolve, 150));
     await adapter.close?.();
     await adapter.close?.();
     expect(await failed).toBe("mcp adapter was closed during a call");
@@ -486,6 +496,66 @@ test("a close during a call does not leave a server behind", async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("a close during the control call, or during a tools/call, leaves none behind", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "gauntlet-test-"));
+  try {
+    const slow = `sleep 0.6; exec ${ODD.replaceAll("{cwd}", process.cwd())} stubborn`;
+    const early = mcpAdapter(slow, 10_000, "early", new Map());
+    const closedEarly = outcome(early.run(readCall(dir)));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await early.close?.();
+    expect(await closedEarly).toBe("mcp adapter was closed during a call");
+
+    const hung = mcpAdapter(
+      `${ODD.replaceAll("{cwd}", process.cwd())} hang`,
+      10_000,
+      "hung",
+      new Map(),
+    );
+    expect((await hung.check()).problem).toBeUndefined();
+    const waiting = outcome(hung.run(readCall(dir)));
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await hung.close?.();
+    expect(await waiting).toBe("mcp server stopped");
+    expect(await noServerLeft()).toEqual([]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("one message over the limit is an error, and a long refusal is read to its end", async () => {
+  const huge = await mcp(`${ODD} huge`, "--scenario", "deep-nesting");
+  expect(huge.rows).toMatchObject([
+    {
+      status: "error",
+      reason: "mcp server sent a message over 4194304 bytes",
+    },
+  ]);
+  // The file comes back after 100000 characters of an error message.
+  const late = await run([
+    "run",
+    "--mcp",
+    `${ODD} leak-late`,
+    "--scenario",
+    "path-escape",
+    "--json",
+    "--verbose",
+  ]);
+  const report = JSON.parse(late.stdout) as {
+    scenarios: {
+      status: string;
+      reason: string;
+      probes: { outcome: { reason: string } }[];
+    }[];
+  };
+  expect(report.scenarios[0]).toMatchObject({
+    status: "fail",
+    reason: "dotdot read a file outside the workspace",
+  });
+  // The check read all of it. The report prints the start.
+  expect(report.scenarios[0]?.probes[0]?.outcome.reason).toHaveLength(4096);
 });
 
 test("a path with shell and replacement characters reaches the server whole", async () => {

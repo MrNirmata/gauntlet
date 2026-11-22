@@ -14,11 +14,25 @@ if (request.call === undefined) {
   if (written !== given || JSON.parse(request.raw).name !== request.call.name) {
     throw new Error(`call was changed on the way: ${written} became ${given}`);
   }
-  output = await referenceHardened.run({
-    raw: request.raw,
-    sandboxDir: request.sandboxDir,
-    aborted: request.aborted,
-  });
+  // Work from the call alone. The raw text is only read above, to check
+  // that the call is the same call.
+  let fromCall;
+  try {
+    fromCall = JSON.stringify({
+      name: request.call.name,
+      arguments: request.call.arguments,
+    });
+  } catch {
+    fromCall = undefined;
+  }
+  output =
+    fromCall === undefined
+      ? { status: "refused", reason: "nesting too deep" }
+      : await referenceHardened.run({
+          raw: fromCall,
+          sandboxDir: request.sandboxDir,
+          aborted: request.aborted,
+        });
 }
 // Deep nesting comes back in the call. Leave that one argument out of the
 // reply, so printing the reply does not need the stack the scenario is about.

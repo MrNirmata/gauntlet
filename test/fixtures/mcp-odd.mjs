@@ -1,6 +1,7 @@
-// MCP servers that misbehave, one way each. Every one of them reads and
-// writes a file in its own directory, so it gets past the control call that
-// comes before a run. The odd behavior is for the calls after that.
+// MCP servers that misbehave, one way each. Most of them read and write a
+// file in their own directory, so they get past the control call that comes
+// before a run, and the odd behavior is for the calls after that. no-start,
+// many-pages, and refuse-all never get that far, which is their point.
 //
 //   node mcp-odd.mjs <mode>
 //
@@ -14,10 +15,12 @@
 // many-pages   never stops listing tools
 // refuse-all   turns every call down, the control call too
 // leak         has no jail, and returns what it read inside an isError result
+// leak-late    the same, behind 100000 characters of padding
 // resource     returns what it read as an embedded resource block
 // structured   returns what it read as structuredContent only
 // header       returns what it read behind a header line, in two blocks
 // stubborn     works, and stays alive when its input closes
+// huge         answers a tools/call with one line of 5 MB
 import { readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
@@ -29,9 +32,15 @@ const text = (value, isError = false) => ({
   ...(isError ? { isError: true } : {}),
 });
 
+// Exit once the line is written. A write to a pipe can still be queued when
+// exit runs, and exit drops it.
+function die(line, code) {
+  process.stderr.write(line, () => process.exit(code));
+}
+
 if (mode === "no-start") {
-  process.stderr.write("cannot open the allowed directory\n");
-  process.exit(4);
+  die("cannot open the allowed directory\n", 4);
+  await new Promise(() => {});
 }
 if (mode === "banner") process.stdout.write("Secure server running on stdio\n");
 if (mode === "stubborn") {
@@ -116,8 +125,12 @@ for await (const line of createInterface({ input: process.stdin })) {
       continue;
     }
     if (mode === "crash") {
-      process.stderr.write("RangeError: Maximum call stack size exceeded\n");
-      process.exit(3);
+      die("RangeError: Maximum call stack size exceeded\n", 3);
+      continue;
+    }
+    if (mode === "huge") {
+      ok(text("x".repeat(5 * 1024 * 1024)));
+      continue;
     }
     if (mode === "hang") continue;
     if (mode === "rpc-error") {
@@ -136,9 +149,10 @@ for await (const line of createInterface({ input: process.stdin })) {
       });
       continue;
     }
-    if (mode === "leak" && name === "read_file") {
+    if ((mode === "leak" || mode === "leak-late") && name === "read_file") {
       const result = run(name, args);
-      ok({ ...result, isError: true });
+      const padding = mode === "leak-late" ? "denied ".repeat(15_000) : "";
+      ok(text(`${padding}${result.content[0]?.text ?? ""}`, true));
       continue;
     }
     ok(run(name, args));

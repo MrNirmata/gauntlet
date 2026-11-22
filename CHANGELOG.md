@@ -16,7 +16,8 @@ Tiers:
 - A scenario whose payload is raw model text is `not-covered` in a structured run.
 - Add `--sarif <file>` and `--sarif-location <path>` for a SARIF 2.1.0 report with one rule per scenario and one result per failure.
 - An interrupt stops what the run started. Ctrl-C left an `--exec` command running, and its sandbox on disk.
-- A refusal that quotes `outside.txt` fails `path-escape` and `path-symlink`. Only an executed read was checked for the bytes.
+- A refusal that quotes `outside.txt` fails `path-escape` and `path-symlink`, however long the refusal is. Only an executed read was checked for the bytes.
+- A bad `--scenario`, `--category`, or `--baseline` is reported before an MCP server is started.
 - `deep-nesting` accepts a read that returns the file text in any wrapping.
 - `adapter.close()` has five seconds.
 - The action takes `mcp`, `tool`, `arg`, `structured`, `tier`, `fail-on`, `sarif`, and `sarif-location`.

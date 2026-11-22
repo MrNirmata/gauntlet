@@ -142,8 +142,6 @@ export async function runCli(
     stderr.write(`${flags.error}\n`);
     return 2;
   }
-  const adapter = await resolveRunAdapter(flags, stderr);
-  if (!adapter) return 2;
   const selected = selectScenarios(
     flags.scenarios,
     flags.categories,
@@ -168,6 +166,10 @@ export async function runCli(
     }
     recorded = loaded;
   }
+  // Last, once the rest of the command line is known to be right. For --mcp
+  // this starts the server and calls its tools.
+  const adapter = await resolveRunAdapter(flags, stderr);
+  if (!adapter) return 2;
   // --exec and --http enforce the limit themselves and kill what they
   // started. An in-process adapter gets the same limit from the runner.
   const options: RunOptions = {

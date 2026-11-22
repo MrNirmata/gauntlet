@@ -275,9 +275,22 @@ function renderTable(
   return [render(headers), ...rows.map((row) => render(row))].join("\n");
 }
 
+// A refusal from an MCP server keeps its whole text, which can be megabytes.
+// A report prints the start of it.
+const MAX_REASON_CHARS = 4096;
+
 function printableProbe(probe: ProbeRecord): ProbeRecord {
   const outcome = probe.outcome;
-  if (outcome.status !== "executed") return probe;
+  if (outcome.status !== "executed") {
+    if (outcome.reason.length <= MAX_REASON_CHARS) return probe;
+    return {
+      raw: probe.raw,
+      outcome: {
+        ...outcome,
+        reason: outcome.reason.slice(0, MAX_REASON_CHARS),
+      },
+    };
+  }
   return {
     raw: probe.raw,
     outcome: {

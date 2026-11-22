@@ -124,7 +124,7 @@ gauntlet run --mcp "node {cwd}/server.js {workspace}" --tool read_file=read_text
 gauntlet run --mcp "python3 {cwd}/server.py" --tool write_file=save --arg path=file_path --arg content=text
 ```
 
-Before the run, Gauntlet starts the server once in an empty directory, asks it to write a file there, and asks it to read the file back. A command that cannot start, a server with neither tool, or a server that does not write and read that file exits 2 with one message. The message lists the server's tools, or quotes what the server replied. A server with only one of the two tools runs, and the scenarios that need the other are `not-covered`.
+Before the run, Gauntlet starts the server once in an empty directory, asks it to write a file there, and asks it to read the file back. A server with one of the two tools is asked to do the one it can. A command that cannot start, a server with neither tool, or a server that fails what it was asked exits 2 with one message. The message lists the server's tools, or quotes what the server replied. A server with only one of the two tools runs, and the scenarios that need the other are `not-covered`.
 
 That first call is what makes a pass mean something. Most scenarios expect a refusal. A server that turned every call down, because it calls the argument `file_path` or takes only absolute paths, would pass them all.
 

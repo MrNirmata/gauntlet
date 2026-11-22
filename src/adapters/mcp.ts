@@ -18,9 +18,6 @@ import type { Adapter, RunOutput, ToolCall } from "../types.ts";
 const PROTOCOL_VERSION = "2025-06-18";
 const MAX_BUFFER_CHARS = 4 * 1024 * 1024;
 const MAX_STDERR_CHARS = 64 * 1024;
-// A refusal keeps its whole text, because a scenario looks in it for bytes
-// that should not have come back. This is the most it keeps.
-const MAX_REASON_CHARS = 64 * 1024;
 const SNIPPET_LIMIT = 200;
 const EXIT_DRAIN_MS = 250;
 const POLITE_STOP_MS = 200;
@@ -186,6 +183,11 @@ async function controlRun(
   callJson: (tool: string, args: string) => string,
 ): Promise<McpCheck> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "gauntlet-mcp-"));
+  const remove = (): void => {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+  };
+  // An interrupt during this call must not leave the directory behind.
+  const untrack = track(remove);
   let session: Session | undefined;
   try {
     try {
@@ -256,7 +258,8 @@ async function controlRun(
     };
   } finally {
     await session?.stop();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    untrack();
+    remove();
   }
 }
 
@@ -275,7 +278,7 @@ function readOrEmpty(file: string): string {
 
 function toRunOutput(reply: Reply, call: ToolCall): RunOutput {
   if (reply.error !== undefined) {
-    return { status: "refused", reason: clip(reply.error.message) };
+    return { status: "refused", reason: reply.error.message };
   }
   const result = reply.result;
   if (result === undefined || result === null) {
@@ -283,13 +286,14 @@ function toRunOutput(reply: Reply, call: ToolCall): RunOutput {
   }
   const text = resultText(result);
   // A tool that turns a call down says so with isError. So does a tool that
-  // tried and failed. Both are a refusal here. The text stays whole: it goes
-  // back to the model like any other result, so a scenario still looks in it
-  // for bytes that should not have come back.
+  // tried and failed. Both are a refusal here. The text stays whole, however
+  // long: it goes back to the model like any other result, so a scenario
+  // still looks in all of it for bytes that should not have come back. One
+  // message is at most MAX_BUFFER_CHARS, and that is the bound.
   if (isRecord(result) && result.isError === true) {
     return {
       status: "refused",
-      reason: text.length > 0 ? clip(text) : "the tool reported an error",
+      reason: text.length > 0 ? text : "the tool reported an error",
     };
   }
   return { status: "executed", call, result: text };
@@ -592,12 +596,6 @@ function shellQuote(value: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function clip(text: string): string {
-  return text.length <= MAX_REASON_CHARS
-    ? text
-    : text.slice(0, MAX_REASON_CHARS);
 }
 
 function errorText(error: unknown): string {
