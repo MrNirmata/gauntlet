@@ -73,6 +73,7 @@ Checks on the 12 scenarios of 0.1 that changed:
 - An empty filter, a `--timeout` above 2147483647, and an `--http` value that is not a URL exit 2.
 - `Scenario` has `expected`, `tier`, `layer`, and `cwe`, and an optional `setup`. `Result` has `tier` and `probes`.
 - `package.json` has a `prepare` script, so an install from git has `dist`.
+- The `bin` path in `package.json` is `dist/cli.js`, with no `./` in front. npm 11 drops an entry that has one when it publishes, and the package installs without the `gauntlet` command.
 
 ### Holes in `reference-hardened`
 

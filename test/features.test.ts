@@ -404,3 +404,18 @@ test("the built package entry runs the suite from code", async () => {
   });
   expect(api.asRunOutput({ status: "refused" })).toBeUndefined();
 });
+
+test("the bin path is one npm keeps", () => {
+  const manifest = JSON.parse(readFileSync("package.json", "utf8")) as {
+    bin: Record<string, string>;
+    files: string[];
+  };
+  // npm 11 drops a bin entry whose path starts with "./" when it publishes,
+  // with a warning and no error. The package then installs without the
+  // gauntlet command.
+  expect(manifest.bin).toEqual({ gauntlet: "dist/cli.js" });
+  expect(manifest.files).toContain("dist");
+  expect(readFileSync(manifest.bin.gauntlet ?? "", "utf8")).toMatch(
+    /^#!\/usr\/bin\/env node\n/,
+  );
+});

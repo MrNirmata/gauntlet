@@ -17,7 +17,7 @@
     "node": ">=22"
   },
   "bin": {
-    "gauntlet": "./dist/cli.js"
+    "gauntlet": "dist/cli.js"
   },
   "files": [
     "dist",
