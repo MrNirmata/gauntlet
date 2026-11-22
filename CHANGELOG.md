@@ -6,7 +6,8 @@ Targets that never read raw model text:
 
 - Add `--mcp <command>`. Gauntlet starts an MCP server on stdio, once per scenario and in the scenario's workspace, and sends each probe as a `tools/call` request. `--tool` maps `read_file` and `write_file` to the server's names, and `--arg` maps `path` and `content`. No adapter is written. Before the run the server is started once and asked to write a file and read it back. One that cannot start, has neither tool, or does not do that exits 2 with one message. Without that call, a server that turned everything down passed every scenario that expects a refusal.
 - Add `--structured` for `--adapter`, `--exec`, and `--http`. Each probe carries `call`, the call already split from the text.
-- An adapter may have `close()`, called after each scenario.
+- An adapter may have `close()`, called after each scenario that sent a probe.
+- `outside.txt` holds text nothing writes by accident. It held `secret`, and a refusal that used the word counted as a leak.
 
 Tiers:
 

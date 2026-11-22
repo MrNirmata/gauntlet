@@ -331,7 +331,7 @@ type Adapter = {
 };
 ```
 
-`AdapterRunInput` has `raw`, `sandboxDir`, and `aborted`, and `call` in a structured run. `RunOutput` is `executed`, `refused`, or `not-covered`. An adapter may have `close()`, which is called after each scenario and before its sandbox is deleted.
+`AdapterRunInput` has `raw`, `sandboxDir`, and `aborted`, and `call` in a structured run. `RunOutput` is `executed`, `refused`, or `not-covered`. An adapter may have `close()`, which is called after each scenario that sent a probe, before its sandbox is deleted.
 
 ## Use it from code
 

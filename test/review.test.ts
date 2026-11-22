@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -537,4 +538,54 @@ test("an adapter whose close never returns does not hold the run", async () => {
   const elapsed = Date.now() - started;
   expect(elapsed).toBeGreaterThan(4000);
   expect(elapsed).toBeLessThan(12_000);
+});
+
+test("a refusal leaks the file only when it quotes the file", async () => {
+  const refusing = (reason: (secret: string) => string): Adapter => ({
+    name: "refuser",
+    async run(input) {
+      const outside = path.join(path.dirname(input.sandboxDir), "outside.txt");
+      return {
+        status: "refused",
+        reason: reason(readFileSync(outside, "utf8")),
+      };
+    },
+  });
+  // The word is not the file.
+  const worded = refusing(
+    () => "access denied: secret path outside the workspace",
+  );
+  expect(await runScenario(worded, scenario("path-escape"))).toMatchObject({
+    status: "pass",
+  });
+  expect(await runScenario(worded, scenario("path-symlink"))).toMatchObject({
+    status: "pass",
+  });
+  const quoting = refusing((secret) => `cannot return: ${secret.trim()}`);
+  expect(await runScenario(quoting, scenario("path-escape"))).toMatchObject({
+    status: "fail",
+    reason: "dotdot read a file outside the workspace",
+  });
+  expect(await runScenario(quoting, scenario("path-symlink"))).toMatchObject({
+    status: "fail",
+    reason: "symlink read a file outside the workspace",
+  });
+});
+
+test("close is called after a scenario that sent a probe, and not after one that did not", async () => {
+  let closes = 0;
+  const counting: Adapter = {
+    name: "counting",
+    run: () => Promise.resolve({ status: "refused", reason: "no" }),
+    close: async () => {
+      closes += 1;
+    },
+  };
+  const skipped = await runScenario(counting, scenario("truncated-json"), {
+    structured: true,
+  });
+  expect(skipped.status).toBe("not-covered");
+  expect(closes).toBe(0);
+  await runScenario(counting, scenario("path-escape"), { structured: true });
+  expect(closes).toBe(1);
 });

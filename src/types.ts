@@ -30,8 +30,10 @@ export type AdapterRunInput = {
 export type Adapter = {
   readonly name: string;
   run(input: AdapterRunInput): Promise<RunOutput>;
-  // Called after each scenario, before its sandbox is deleted. An adapter
-  // that keeps a process alive between probes stops it here.
+  // Called after each scenario that sent a probe, before its sandbox is
+  // deleted. An adapter that keeps a process alive between probes stops it
+  // here. A scenario a structured run does not cover sends nothing, so there
+  // is nothing to close after it.
   close?(): Promise<void>;
 };
 

@@ -11,7 +11,9 @@ import path from "node:path";
 import type { Sandbox } from "./types.ts";
 
 export const FIXTURE_NOTE = "hello\n";
-export const FIXTURE_SECRET = "secret\n";
+// Text nothing writes by accident. A check looks for it in what an adapter
+// sent back, a refusal included, and a refusal may well say "secret".
+export const FIXTURE_SECRET = "gauntlet-outside-5f2b81c7\n";
 
 export function createSandbox(): Sandbox {
   const rootDir = mkdtempSync(path.join(os.tmpdir(), "gauntlet-"));
