@@ -13,7 +13,7 @@ import {
   referenceNaive,
 } from "../src/adapters/reference.ts";
 import { runScenario } from "../src/run.ts";
-import { scenarios } from "../src/scenarios.ts";
+import { scenarios } from "../src/scenarios/index.ts";
 import type { Adapter } from "../src/types.ts";
 
 const ids = scenarios.map((scenario) => scenario.id);
@@ -30,18 +30,28 @@ test("reference-hardened passes every scenario", async () => {
   expect(passed).toEqual(ids);
 });
 
-test("reference-naive fails every scenario except trailing-comma-in-string", async () => {
+// A parser that does not repair is safe from a repair bug, one that does not
+// trim cannot trim content, JSON.parse does not recurse, and the naive
+// adapter hands a failed tool back as its result. Those are passes it earns.
+const NAIVE_PASSES = [
+  "content-whitespace-kept",
+  "trailing-comma-in-string",
+  "duplicate-keys-after-repair",
+  "path-unusable",
+  "deep-nesting",
+];
+
+test("reference-naive fails every scenario it does not survive by being strict", async () => {
   const failed: string[] = [];
   for (const scenario of scenarios) {
     const result = await runScenario(referenceNaive, scenario);
-    const expected =
-      scenario.id === "trailing-comma-in-string" ? "pass" : "fail";
+    const expected = NAIVE_PASSES.includes(scenario.id) ? "pass" : "fail";
     expect(result.status, `${scenario.id}: ${result.reason}`).toBe(expected);
     expect(result.reason).toMatch(/\S/);
     expect(result.reason.includes("\n")).toBe(false);
     if (expected === "fail") failed.push(result.id);
   }
-  expect(failed).toEqual(ids.filter((id) => id !== "trailing-comma-in-string"));
+  expect(failed).toEqual(ids.filter((id) => !NAIVE_PASSES.includes(id)));
 });
 
 test("a thrown adapter error deletes the sandbox", async () => {
@@ -350,4 +360,58 @@ test("an escaped arguments key with unique keys still executes", async () => {
     call: { name: "write_file", arguments: { path: "out.txt", content: "ok" } },
   });
   expect(result.stolen).toBe(false);
+});
+
+test("content-whitespace-kept fails an adapter that trims every argument", async () => {
+  const scenario = scenarios.find(
+    (item) => item.id === "content-whitespace-kept",
+  );
+  if (!scenario) throw new Error("missing content-whitespace-kept scenario");
+  const trimsEverything: Adapter = {
+    name: "trims-everything",
+    async run(input) {
+      const raw = input.raw.replace(
+        /"content":"((?:[^"\\]|\\.)*)"/,
+        (_, body) =>
+          `"content":${JSON.stringify((JSON.parse(`"${body}"`) as string).trim())}`,
+      );
+      return referenceHardened.run({ ...input, raw });
+    },
+  };
+  const result = await runScenario(trimsEverything, scenario);
+  expect(result).toMatchObject({
+    status: "fail",
+    reason: "trimmed whitespace that belongs to the content",
+  });
+  const refuser: Adapter = {
+    name: "refuser",
+    run: () => Promise.resolve({ status: "refused", reason: "no" }),
+  };
+  expect(await runScenario(refuser, scenario)).toMatchObject({
+    status: "fail",
+    reason: "did not write padded.txt",
+  });
+});
+
+test("inherited-tool-name fails a lookup that finds Object.prototype", async () => {
+  const scenario = scenarios.find((item) => item.id === "inherited-tool-name");
+  if (!scenario) throw new Error("missing inherited-tool-name scenario");
+  const naive = await runScenario(referenceNaive, scenario);
+  expect(naive.status).toBe("fail");
+  const ran = (naive.probes ?? []).filter(
+    (probe) => probe.outcome.status === "executed",
+  );
+  expect(ran.map((probe) => JSON.parse(probe.raw).name)).toEqual([
+    "constructor",
+    "toString",
+    "hasOwnProperty",
+  ]);
+  const hardened = await runScenario(referenceHardened, scenario);
+  expect(hardened.status).toBe("pass");
+  for (const probe of hardened.probes ?? []) {
+    expect(probe.outcome).toEqual({
+      status: "refused",
+      reason: "unknown tool",
+    });
+  }
 });

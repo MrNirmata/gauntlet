@@ -5,21 +5,37 @@ import { Writable } from "node:stream";
 import { expect, test } from "vitest";
 import { runCli } from "../src/cli.ts";
 import { formatJson, formatRun } from "../src/format.ts";
-import { scenarios } from "../src/scenarios.ts";
+import { scenarios } from "../src/scenarios/index.ts";
 
 const NAIVE_STATUS = {
+  "argument-type-confusion": "fail",
+  "content-whitespace-kept": "pass",
+  "deep-nesting": "pass",
   "duplicate-keys": "fail",
+  "duplicate-keys-after-repair": "pass",
+  "inherited-tool-name": "fail",
   "json-string-arguments": "fail",
   "oversized-argument": "fail",
   "path-escape": "fail",
+  "path-escape-write": "fail",
+  "path-hardlink-write": "fail",
+  "path-nul-byte": "fail",
   "path-symlink": "fail",
+  "path-symlink-write": "fail",
+  "path-unusable": "pass",
   "prompt-injection-result": "fail",
+  "proto-key-arguments": "fail",
   "stream-aborted": "fail",
   "trailing-comma-in-string": "pass",
   "trailing-comma-json": "fail",
   "truncated-json": "fail",
+  "truncated-xml": "fail",
+  "unicode-bidi-path": "fail",
+  "unicode-lone-surrogate": "fail",
+  "unicode-trimmed-path": "fail",
   "unicode-zero-width-path": "fail",
   "whitespace-padded-args": "fail",
+  "xml-duplicate-params": "fail",
 } as const;
 
 test("update-baseline writes the reference-naive results", async () => {
@@ -35,7 +51,7 @@ test("update-baseline writes the reference-naive results", async () => {
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain(
-      "1 passed, 11 failed, 0 errors, 0 not covered",
+      "5 passed, 23 failed, 0 errors, 0 not covered",
     );
     expect(Object.keys(NAIVE_STATUS).sort()).toEqual(
       scenarios.map((scenario) => scenario.id).sort(),
@@ -349,8 +365,6 @@ test("update-baseline exits 2 when the file cannot be written", async () => {
       "run",
       "--adapter",
       "reference-naive",
-      "--scenario",
-      "truncated-json",
       "--update-baseline",
       dir,
     ]);

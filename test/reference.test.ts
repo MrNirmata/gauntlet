@@ -1,0 +1,581 @@
+import { spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, expect, test } from "vitest";
+import { resolveInside } from "../src/adapters/reference/jail.ts";
+import { parseStrictJson } from "../src/adapters/reference/json.ts";
+import { parseXmlCall } from "../src/adapters/reference/xml.ts";
+import { referenceHardened } from "../src/adapters/reference.ts";
+
+const STRICT = {
+  allowTrailingCommas: false,
+  rejectDuplicateKeys: true,
+  maxDepth: 64,
+};
+const LENIENT = { ...STRICT, allowTrailingCommas: true };
+
+// mulberry32. The same seed gives the same documents on every run.
+function random(seed: number): () => number {
+  let state = seed;
+  return () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let mixed = Math.imul(state ^ (state >>> 15), 1 | state);
+    mixed = (mixed + Math.imul(mixed ^ (mixed >>> 7), 61 | mixed)) ^ mixed;
+    return ((mixed ^ (mixed >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const KEY_PARTS = ["a", "b", "path", "__proto__", "é", "\n", '"', "\\", "😀"];
+
+function randomValue(next: () => number, depth: number): unknown {
+  const pick = Math.floor(next() * (depth > 3 ? 5 : 7));
+  if (pick === 0) return null;
+  if (pick === 1) return next() < 0.5;
+  if (pick === 2) return Math.round((next() - 0.5) * 1e6) / 1e3;
+  if (pick === 3) return Math.floor((next() - 0.5) * 1e12);
+  if (pick === 4) {
+    let text = "";
+    const length = Math.floor(next() * 6);
+    for (let index = 0; index < length; index += 1) {
+      text += KEY_PARTS[Math.floor(next() * KEY_PARTS.length)] ?? "";
+    }
+    return text;
+  }
+  const length = Math.floor(next() * 4);
+  if (pick === 5) {
+    return Array.from({ length }, () => randomValue(next, depth + 1));
+  }
+  const entries: [string, unknown][] = [];
+  for (let index = 0; index < length; index += 1) {
+    const key = `${KEY_PARTS[Math.floor(next() * KEY_PARTS.length)]}${index}`;
+    entries.push([key, randomValue(next, depth + 1)]);
+  }
+  return Object.fromEntries(entries);
+}
+
+test("the strict parser reads what JSON.parse reads", () => {
+  const next = random(20261122);
+  for (let round = 0; round < 500; round += 1) {
+    const value = randomValue(next, 0);
+    for (const text of [
+      JSON.stringify(value),
+      JSON.stringify(value, null, 2),
+    ]) {
+      const parsed = parseStrictJson(text, STRICT);
+      expect(parsed, text).toEqual({ ok: true, value: JSON.parse(text) });
+    }
+  }
+});
+
+test("the strict parser refuses what JSON.parse refuses", () => {
+  const invalid = [
+    "",
+    "{",
+    '{"a":1',
+    '{"a":1}}',
+    '{"a":1} x',
+    "{,}",
+    "[,]",
+    "[1,,2]",
+    '{"a":1,,}',
+    "{'a':1}",
+    "{a:1}",
+    '{"a":01}',
+    '{"a":1.}',
+    '{"a":.5}',
+    '{"a":1e}',
+    '{"a":+1}',
+    '{"a":"\\x"}',
+    '{"a":"\\u12"}',
+    '{"a":"line\nbreak"}',
+    '{"a":tru}',
+    '{"a":nulll}',
+    '{"a":NaN}',
+    "// c\n{}",
+  ];
+  for (const text of invalid) {
+    expect(() => JSON.parse(text), text).toThrow();
+    expect(parseStrictJson(text, STRICT), text).toEqual({
+      ok: false,
+      reason: "invalid JSON",
+    });
+    if (text.includes(",}") || text.includes(",]")) continue;
+    expect(parseStrictJson(text, LENIENT), text).toEqual({
+      ok: false,
+      reason: "invalid JSON",
+    });
+  }
+});
+
+test("a trailing comma is one comma after an item", () => {
+  expect(parseStrictJson('{"a":[1,2,],}', LENIENT)).toEqual({
+    ok: true,
+    value: { a: [1, 2] },
+  });
+  expect(parseStrictJson('{"a":[1,2,],}', STRICT).ok).toBe(false);
+  for (const text of ["{,}", "[,]", "[1,,]", '{"a":1,,}']) {
+    expect(parseStrictJson(text, LENIENT), text).toEqual({
+      ok: false,
+      reason: "invalid JSON",
+    });
+  }
+});
+
+test("a duplicate key is refused at any depth, escaped or not", () => {
+  for (const text of [
+    '{"a":1,"a":2}',
+    '{"a":1,"\\u0061":2}',
+    '{"x":[{"b":{"c":1,"c":2}}]}',
+    '{"a":1,"a":2,}',
+  ]) {
+    expect(parseStrictJson(text, LENIENT), text).toEqual({
+      ok: false,
+      reason: "duplicate key",
+    });
+  }
+  expect(
+    parseStrictJson('{"a":1,"a":2}', { ...STRICT, rejectDuplicateKeys: false }),
+  ).toEqual({ ok: true, value: { a: 2 } });
+});
+
+test("nesting stops at maxDepth without touching the stack limit", () => {
+  const deep = (levels: number) => "[".repeat(levels) + "]".repeat(levels);
+  expect(parseStrictJson(deep(64), STRICT).ok).toBe(true);
+  expect(parseStrictJson(deep(65), STRICT)).toEqual({
+    ok: false,
+    reason: "nesting too deep",
+  });
+  expect(parseStrictJson(deep(200_000), STRICT)).toEqual({
+    ok: false,
+    reason: "nesting too deep",
+  });
+});
+
+test("__proto__ is an own key and not a prototype", () => {
+  const parsed = parseStrictJson('{"__proto__":{"path":"x"}}', STRICT);
+  if (!parsed.ok) throw new Error("expected a parse");
+  const value = parsed.value as Record<string, unknown>;
+  expect(Object.keys(value)).toEqual(["__proto__"]);
+  expect(Object.getPrototypeOf(value)).toBe(Object.prototype);
+  expect(value.path).toBeUndefined();
+});
+
+test("strict XML refuses what the lenient parser accepts", () => {
+  const strict = { strict: true };
+  const lenient = { strict: false };
+  const whole =
+    "<write_file>\n<path>a.txt</path>\n<content>x</content>\n</write_file>";
+  expect(parseXmlCall(whole, strict)).toEqual({
+    ok: true,
+    call: { name: "write_file", arguments: { path: "a.txt", content: "x" } },
+  });
+  expect(parseXmlCall(whole, lenient)).toEqual(parseXmlCall(whole, strict));
+  const cases: [string, string][] = [
+    [
+      "<write_file>\n<path>a.txt</path>\n<content>x</content>\n",
+      "truncated or invalid XML",
+    ],
+    [
+      "<write_file>\n<path>a.txt</path>\n<content>x",
+      "truncated or invalid XML",
+    ],
+    [
+      "<write_file><path>a.txt</path><content>x</write_file>",
+      "truncated or invalid XML",
+    ],
+    [
+      "<write_file><path>a.txt</path><path>b.txt</path></write_file>",
+      "duplicate parameter",
+    ],
+    [
+      "<write_file><path>a.txt</path> stray <content>x</content></write_file>",
+      "text between XML parameters",
+    ],
+    ["no tag", "invalid XML"],
+  ];
+  for (const [raw, reason] of cases) {
+    expect(parseXmlCall(raw, strict), raw).toEqual({ ok: false, reason });
+  }
+  expect(
+    parseXmlCall(
+      "<write_file><path>a.txt</path><path>b.txt</path></write_file>",
+      lenient,
+    ),
+  ).toMatchObject({ ok: true, call: { arguments: { path: "b.txt" } } });
+  expect(
+    parseXmlCall("<write_file>\n<path>a.txt</path>\n<content>x", lenient),
+  ).toMatchObject({
+    ok: true,
+    call: { arguments: { path: "a.txt", content: "x" } },
+  });
+});
+
+let root = "";
+let workspace = "";
+
+beforeEach(() => {
+  root = mkdtempSync(path.join(os.tmpdir(), "gauntlet-jail-"));
+  workspace = path.join(root, "workspace");
+  mkdirSync(path.join(workspace, "sub"), { recursive: true });
+  writeFileSync(path.join(workspace, "notes.txt"), "hello\n");
+  writeFileSync(path.join(root, "outside.txt"), "secret\n");
+});
+
+afterEach(() => {
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("the jail resolves paths that stay inside", () => {
+  for (const inside of [
+    "notes.txt",
+    "new.txt",
+    "sub/new.txt",
+    "sub/deeper/new.txt",
+    "./notes.txt",
+  ]) {
+    expect(resolveInside(workspace, inside), inside).toEqual({
+      ok: true,
+      path: path.resolve(workspace, inside),
+    });
+  }
+  symlinkSync(path.join(workspace, "notes.txt"), path.join(workspace, "same"));
+  expect(resolveInside(workspace, "same").ok).toBe(true);
+});
+
+test("the jail refuses every way out", () => {
+  symlinkSync(path.join(root, "outside.txt"), path.join(workspace, "alias"));
+  symlinkSync(path.join(root, "created.txt"), path.join(workspace, "fresh"));
+  symlinkSync(root, path.join(workspace, "updir"));
+  symlinkSync(path.join(root, "nowhere"), path.join(workspace, "gone"));
+  symlinkSync("loop", path.join(workspace, "loop"));
+  const cases: [string, string][] = [
+    ["", "empty path"],
+    ["../outside.txt", "parent segment rejected"],
+    ["sub/../../outside.txt", "parent segment rejected"],
+    ["sub\\..\\..\\outside.txt", "parent segment rejected"],
+    [path.join(root, "outside.txt"), "absolute path rejected"],
+    ["C:\\Windows\\win.ini", "absolute path rejected"],
+    ["notes.txt\u0000.md", "path contains control characters"],
+    ["notes\n.txt", "path contains control characters"],
+    ["notes\u200b.txt", "path contains invisible characters"],
+    ["notes\u202etxt.sh", "path contains invisible characters"],
+    ["no\u00adtes.txt", "path contains invisible characters"],
+    ["alias", "symlink escapes workspace"],
+    ["fresh", "dangling symlink rejected"],
+    ["updir/dropped.txt", "symlink escapes workspace"],
+    ["gone/inner/file.txt", "dangling symlink rejected"],
+    ["loop", "dangling symlink rejected"],
+  ];
+  for (const [userPath, reason] of cases) {
+    expect(
+      resolveInside(workspace, userPath),
+      JSON.stringify(userPath),
+    ).toEqual({
+      ok: false,
+      reason,
+    });
+  }
+});
+
+test("reference-hardened does not create a file through a dangling symlink", async () => {
+  symlinkSync(path.join(root, "created.txt"), path.join(workspace, "fresh"));
+  const output = await referenceHardened.run({
+    raw: JSON.stringify({
+      name: "write_file",
+      arguments: { path: "fresh", content: "escaped" },
+    }),
+    sandboxDir: workspace,
+    aborted: false,
+  });
+  expect(output).toEqual({
+    status: "refused",
+    reason: "dangling symlink rejected",
+  });
+  expect(readdirSync(root).sort()).toEqual(["outside.txt", "workspace"]);
+});
+
+test("reference-hardened reports a failed tool as its result", async () => {
+  const output = await referenceHardened.run({
+    raw: JSON.stringify({
+      name: "write_file",
+      arguments: { path: "sub/missing/new.txt", content: "x" },
+    }),
+    sandboxDir: workspace,
+    aborted: false,
+  });
+  expect(output).toMatchObject({ status: "executed", result: "error: ENOENT" });
+});
+
+async function hardened(name: string, args: Record<string, unknown>) {
+  return referenceHardened.run({
+    raw: JSON.stringify({ name, arguments: args }),
+    sandboxDir: workspace,
+    aborted: false,
+  });
+}
+
+test("the jail returns for paths the filesystem turns down", async () => {
+  symlinkSync("loop", path.join(workspace, "loop"));
+  mkdirSync(path.join(workspace, "locked"), { mode: 0o000 });
+  try {
+    const cases: [string, string][] = [
+      ["notes.txt/x", "path goes through a file"],
+      ["loop/x", "dangling symlink rejected"],
+    ];
+    for (const [userPath, reason] of cases) {
+      expect(resolveInside(workspace, userPath), userPath).toEqual({
+        ok: false,
+        reason,
+      });
+    }
+    // Root is not stopped by a mode. The locked directory proves nothing then.
+    const unusable = ["a".repeat(300), `${"a/".repeat(2500)}a`];
+    if (process.getuid?.() !== 0) unusable.push("locked/x");
+    for (const userPath of unusable) {
+      expect(resolveInside(workspace, userPath).ok, userPath.slice(0, 20)).toBe(
+        true,
+      );
+      const read = await hardened("read_file", { path: userPath });
+      expect(read.status, userPath.slice(0, 20)).toBe("executed");
+      const write = await hardened("write_file", {
+        path: userPath,
+        content: "x",
+      });
+      expect(write, userPath.slice(0, 20)).toMatchObject({
+        status: "executed",
+        result: expect.stringMatching(/^error: E[A-Z]+$/),
+      });
+    }
+  } finally {
+    chmodSync(path.join(workspace, "locked"), 0o700);
+  }
+});
+
+test("only plain whitespace is trimmed from a path", async () => {
+  const padded = await hardened("read_file", { path: " \t notes.txt\r\n" });
+  expect(padded).toMatchObject({ status: "executed", result: "hello\n" });
+  for (const userPath of [
+    "\ufeffnotes.txt",
+    "notes.txt\ufeff",
+    "\u00a0notes.txt",
+    "notes.txt\u2028",
+    "notes.txt\u0085",
+    "notes.txt\u001f",
+  ]) {
+    const output = await hardened("write_file", {
+      path: userPath,
+      content: "x",
+    });
+    expect(output.status, JSON.stringify(userPath)).toBe("refused");
+  }
+  expect(readdirSync(workspace).sort()).toEqual(["notes.txt", "sub"]);
+  expect(readFileSync(path.join(workspace, "notes.txt"), "utf8")).toBe(
+    "hello\n",
+  );
+  const bom = await referenceHardened.run({
+    raw: "\ufeff<read_file><path>notes.txt</path></read_file>",
+    sandboxDir: workspace,
+    aborted: false,
+  });
+  expect(bom.status).toBe("refused");
+});
+
+test("the jail refuses characters that do not draw and accepts letters", () => {
+  const hidden = [
+    0x0085, 0x009b, 0x00a0, 0x034f, 0x115f, 0x17b5, 0x180b, 0x200c, 0x200d,
+    0x2028, 0x2029, 0x2800, 0x3000, 0x3164, 0xd800, 0xe000, 0xfe0f, 0xffa0,
+    0xfff9, 0xfffc, 0x1d173, 0xe0074, 0xe0100,
+  ];
+  for (const code of hidden) {
+    const userPath = `notes${String.fromCodePoint(code)}.txt`;
+    expect(
+      resolveInside(workspace, userPath).ok,
+      `U+${code.toString(16)}`,
+    ).toBe(false);
+  }
+  for (const userPath of [
+    "my notes.txt",
+    "caf\u00e9.txt",
+    "\u0444\u0430\u0439\u043b.txt",
+    "\u65e5\u672c\u8a9e.txt",
+    "\u{1f600}.txt",
+    "a-b_c.d~e (1) [2] {3} #4 @5 +6 =7 ,8 ;9 !0",
+  ]) {
+    expect(resolveInside(workspace, userPath).ok, userPath).toBe(true);
+  }
+});
+
+test("a write needs one plain file with one name", async () => {
+  linkSync(path.join(root, "outside.txt"), path.join(workspace, "twin.txt"));
+  expect(
+    await hardened("write_file", { path: "twin.txt", content: "x" }),
+  ).toEqual({
+    status: "refused",
+    reason: "write target has more than one hard link",
+  });
+  expect(readFileSync(path.join(root, "outside.txt"), "utf8")).toBe("secret\n");
+  expect(await hardened("write_file", { path: "sub", content: "x" })).toEqual({
+    status: "refused",
+    reason: "write target is not a regular file",
+  });
+  const fifo = spawnSync("mkfifo", [path.join(workspace, "pipe")]);
+  if (fifo.status === 0) {
+    const started = Date.now();
+    expect(
+      await hardened("write_file", { path: "pipe", content: "x" }),
+    ).toEqual({
+      status: "refused",
+      reason: "write target is not a regular file",
+    });
+    expect(Date.now() - started).toBeLessThan(2000);
+  }
+});
+
+test("content with a lone surrogate is refused before the file is opened", async () => {
+  const output = await referenceHardened.run({
+    raw: '{"name":"write_file","arguments":{"path":"notes.txt","content":"A\\ud800B"}}',
+    sandboxDir: workspace,
+    aborted: false,
+  });
+  expect(output).toEqual({
+    status: "refused",
+    reason: "content is not valid Unicode",
+  });
+  expect(readFileSync(path.join(workspace, "notes.txt"), "utf8")).toBe(
+    "hello\n",
+  );
+  const pair = await hardened("write_file", {
+    path: "notes.txt",
+    content: "\u{1f600}",
+  });
+  expect(pair.status).toBe("executed");
+});
+
+test("utf-8 is accepted however it is spelled", async () => {
+  for (const encoding of ["utf-8", "UTF-8", "utf8", " Utf8 "]) {
+    const output = await hardened("read_file", { path: "notes.txt", encoding });
+    expect(output.status, encoding).toBe("executed");
+  }
+  for (const encoding of ["latin1", "\ufeffutf-8", "utf-8\u001f", 8]) {
+    const output = await hardened("read_file", { path: "notes.txt", encoding });
+    expect(output.status, String(encoding)).toBe("refused");
+  }
+});
+
+const python3 = spawnSync("python3", ["--version"], { encoding: "utf8" });
+
+function pythonHardened(request: Record<string, unknown>) {
+  const child = spawnSync("python3", ["examples/python-hardened.py"], {
+    input: JSON.stringify({
+      sandboxDir: workspace,
+      aborted: false,
+      ...request,
+    }),
+    encoding: "utf8",
+    timeout: 20_000,
+  });
+  return {
+    code: child.status,
+    output: child.status === 0 ? (JSON.parse(child.stdout) as unknown) : null,
+    stderr: child.stderr,
+  };
+}
+
+test.skipIf(python3.status !== 0)(
+  "the python example refuses before it writes, and always replies",
+  () => {
+    const write = (extra: string) =>
+      `{"name":"write_file","arguments":{"path":"notes.txt","content":"OVERWRITTEN"${extra}}}`;
+    const deep = (levels: number) => "[".repeat(levels) + "]".repeat(levels);
+    const refusedRaw = [
+      write(`,"x":${deep(63)}`),
+      write(`,"x":${deep(1000)}`),
+      write(`,"x":${deep(5000)}`),
+      write(',"x":NaN'),
+      write(',"x":-Infinity'),
+      write(',"x":1e999'),
+      write(`,"x":${"9".repeat(5000)}`),
+      '{"name":"write_file","arguments":{"path":"notes.txt","content":"A\\ud800B"}}',
+      '{"name":"write_file","arguments":{"path":"a\\ud800.txt","content":"x"}}',
+      '{"name":"write_file","arguments":{"path":"notes.txt\\u0085","content":"x"}}',
+      '{"name":"write_file","arguments":{"path":"notes.txt/..namedfork/rsrc","content":"x"}}',
+      "\u001f<write_file><path>notes.txt</path><content>x</content></write_file>",
+    ];
+    for (const raw of refusedRaw) {
+      const reply = pythonHardened({ raw });
+      expect(reply.code, `${raw.slice(0, 90)} ${reply.stderr}`).toBe(0);
+      expect(reply.output, raw.slice(0, 90)).toMatchObject({
+        status: "refused",
+      });
+    }
+    for (const aborted of [true, 1, "true", null]) {
+      const reply = pythonHardened({ raw: write(""), aborted });
+      expect(reply.output, String(aborted)).toMatchObject({
+        status: "refused",
+      });
+    }
+    expect(readFileSync(path.join(workspace, "notes.txt"), "utf8")).toBe(
+      "hello\n",
+    );
+    expect(readdirSync(workspace).sort()).toEqual(["notes.txt", "sub"]);
+    // A trailing comma after a string, in an array and in an object, with
+    // and without padding around it, is repaired.
+    for (const tail of [
+      '"t":["a",],',
+      '"t":["a" , ] , ',
+      '"t":[{"k":"v",},"s",]',
+    ]) {
+      const reply = pythonHardened({
+        raw: `{"name":"read_file","arguments":{"path":"notes.txt",${tail}}}`,
+      });
+      expect(reply.output, tail).toMatchObject({ status: "executed" });
+    }
+    writeFileSync(path.join(workspace, "mixed.txt"), "a\r\nb\rc");
+    expect(
+      pythonHardened({
+        raw: '{"name":"read_file","arguments":{"path":"mixed.txt","encoding":"UTF-8"}}',
+      }).output,
+    ).toMatchObject({ status: "executed", result: "a\r\nb\rc" });
+    writeFileSync(
+      path.join(workspace, "bin.dat"),
+      Buffer.from([0x41, 0xff, 0x42]),
+    );
+    expect(
+      pythonHardened({
+        raw: '{"name":"read_file","arguments":{"path":"bin.dat"}}',
+      }).output,
+    ).toMatchObject({ status: "executed", result: "A\ufffdB" });
+  },
+);
+
+test.skipIf(python3.status !== 0)(
+  "the naive python example does not empty a file it then refuses to write",
+  () => {
+    const lone = `${String.fromCharCode(0x5c)}ud800`;
+    const child = spawnSync("python3", ["examples/python-adapter.py"], {
+      input: JSON.stringify({
+        raw: `{"name":"write_file","arguments":{"path":"notes.txt","content":"A${lone}B"}}`,
+        sandboxDir: workspace,
+        aborted: false,
+      }),
+      encoding: "utf8",
+      timeout: 20_000,
+    });
+    expect(child.status, child.stderr).toBe(0);
+    expect(JSON.parse(child.stdout)).toMatchObject({ status: "refused" });
+    expect(readFileSync(path.join(workspace, "notes.txt"), "utf8")).toBe(
+      `hello${String.fromCharCode(10)}`,
+    );
+  },
+);

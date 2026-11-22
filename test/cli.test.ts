@@ -12,7 +12,7 @@ import { Writable } from "node:stream";
 import { expect, test } from "vitest";
 import { runCli } from "../src/cli.ts";
 import { formatJson, formatRun } from "../src/format.ts";
-import { scenarios } from "../src/scenarios.ts";
+import { scenarios } from "../src/scenarios/index.ts";
 
 test("list prints every scenario id", async () => {
   const stdout = memoryStream();

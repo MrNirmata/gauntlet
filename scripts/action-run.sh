@@ -34,6 +34,9 @@ fi
 if [[ -n "${INPUT_SCENARIO:-}" ]]; then
   args+=(--scenario "$INPUT_SCENARIO")
 fi
+if [[ -n "${INPUT_CATEGORY:-}" ]]; then
+  args+=(--category "$INPUT_CATEGORY")
+fi
 
 json_file="$(mktemp)"
 stderr_file="$(mktemp)"

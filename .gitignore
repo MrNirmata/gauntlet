@@ -3,3 +3,4 @@ dist
 coverage
 third_party
 .DS_Store
+.claude

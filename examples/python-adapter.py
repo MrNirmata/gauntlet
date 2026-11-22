@@ -28,9 +28,14 @@ def main() -> None:
         sys.exit("expected raw and sandboxDir strings")
     try:
         output = execute(raw, sandbox)
-    except OSError as error:
-        output = {"status": "refused", "reason": str(error)}
-    json.dump(output, sys.stdout)
+        reply = json.dumps(output)
+    except (OSError, ValueError, RecursionError) as error:
+        # ValueError is a NUL byte in a path. RecursionError is JSON nested
+        # deeper than the interpreter's stack, on the way in or on the way out.
+        reply = json.dumps(
+            {"status": "refused", "reason": str(error) or type(error).__name__}
+        )
+    sys.stdout.write(reply)
     sys.stdout.write("\n")
 
 
@@ -64,8 +69,11 @@ def execute(raw: str, sandbox: str) -> dict:
     content = arguments.get("content")
     if not isinstance(content, str):
         return {"status": "refused", "reason": "missing argument"}
-    with open(target, "w", encoding="utf-8") as handle:
-        handle.write(content)
+    # Encode first. open(..., "w") empties the file, and content UTF-8 cannot
+    # hold would fail after that, with the reply saying the call was refused.
+    data = content.encode("utf-8")
+    with open(target, "wb") as handle:
+        handle.write(data)
     return {"status": "executed", "call": call, "result": "wrote"}
 
 

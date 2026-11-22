@@ -1,27 +1,32 @@
-import {
-  existsSync,
-  readFileSync,
-  realpathSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Adapter, RunOutput, ToolCall } from "../types.ts";
+import { resolveInside } from "./reference/jail.ts";
+import { parseStrictJson, setOwn } from "./reference/json.ts";
+import { parseXmlCall } from "./reference/xml.ts";
 
 const MAX_RAW_BYTES = 65536;
+const MAX_JSON_DEPTH = 64;
 
-const INVISIBLE = new Set([
-  0x200b, 0x200c, 0x200d, 0xfeff, 0x2060, 0x202a, 0x202b, 0x202c, 0x202d,
-  0x202e, 0x2066, 0x2067, 0x2068, 0x2069,
-]);
-
+// Each switch is one decision the two reference adapters make differently.
 type Policy = {
   trimIdentifiers: boolean;
-  repairTrailingCommas: boolean;
-  rejectDuplicateKeys: boolean;
+  // One parser that repairs a trailing comma and refuses duplicate keys and
+  // deep nesting. Off means JSON.parse.
+  strictJson: boolean;
+  // Refuse an unclosed call, a repeated parameter, and stray text.
+  strictXml: boolean;
   unwrapStringArguments: boolean;
   executeTruncatedJson: boolean;
+  // Copy argument keys as own properties, and keep an argument's type.
+  keepArgumentShape: boolean;
+  // Look a tool up by its own name only. Off means `TOOLS[name]`, which
+  // also finds constructor and toString.
+  ownToolNamesOnly: boolean;
   jailPaths: boolean;
+  // Refuse text UTF-8 cannot hold, and a write target that is not one plain
+  // file with one name.
+  guardWrites: boolean;
   honorAbort: boolean;
   executeToolCallFoundInResult: boolean;
   maxRawBytes: number | null;
@@ -31,11 +36,14 @@ type Parsed = { ok: true; call: ToolCall } | { ok: false; reason: string };
 
 const naivePolicy: Policy = {
   trimIdentifiers: false,
-  repairTrailingCommas: false,
-  rejectDuplicateKeys: false,
+  strictJson: false,
+  strictXml: false,
   unwrapStringArguments: false,
   executeTruncatedJson: true,
+  keepArgumentShape: false,
+  ownToolNamesOnly: false,
   jailPaths: false,
+  guardWrites: false,
   honorAbort: false,
   executeToolCallFoundInResult: true,
   maxRawBytes: null,
@@ -43,11 +51,14 @@ const naivePolicy: Policy = {
 
 const hardenedPolicy: Policy = {
   trimIdentifiers: true,
-  repairTrailingCommas: true,
-  rejectDuplicateKeys: true,
+  strictJson: true,
+  strictXml: true,
   unwrapStringArguments: true,
   executeTruncatedJson: false,
+  keepArgumentShape: true,
+  ownToolNamesOnly: true,
   jailPaths: true,
+  guardWrites: true,
   honorAbort: true,
   executeToolCallFoundInResult: false,
   maxRawBytes: MAX_RAW_BYTES,
@@ -99,19 +110,19 @@ function executePayload(
       reason: `argument exceeds ${policy.maxRawBytes} bytes`,
     };
   }
-  const parsed = raw.trimStart().startsWith("<")
-    ? parseXml(raw)
+  const parsed = raw.replace(LEADING_SPACE, "").startsWith("<")
+    ? parseXmlCall(raw, { strict: policy.strictXml })
     : parseJson(raw, policy);
   if (!parsed.ok) return { status: "refused", reason: parsed.reason };
   const call = applyTrim(parsed.call, policy);
-  const executed = executeCall(call, sandboxDir, policy.jailPaths);
+  const executed = executeCall(call, sandboxDir, policy);
   if (
     executed.status === "executed" &&
     policy.executeToolCallFoundInResult &&
     executed.call.name === "read_file"
   ) {
     const followUp = toolCallInText(executed.result);
-    if (followUp) return executeCall(followUp, sandboxDir, policy.jailPaths);
+    if (followUp) return executeCall(followUp, sandboxDir, policy);
   }
   return executed;
 }
@@ -121,81 +132,55 @@ function applyTrim(call: ToolCall, policy: Policy): ToolCall {
   const args: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(call.arguments)) {
     const identifier = key === "path" || key === "encoding" || key === "mode";
-    args[key] = identifier && typeof value === "string" ? value.trim() : value;
+    setOwn(
+      args,
+      key,
+      identifier && typeof value === "string" ? trimSpace(value) : value,
+    );
   }
   return { name: call.name, arguments: args };
 }
 
-function parseXml(raw: string): Parsed {
-  const root = /^<([a-z0-9_]+)>\n?([\s\S]*)<\/\1>\s*$/.exec(raw.trim());
-  const name = root?.[1];
-  const body = root?.[2];
-  if (!name || body === undefined) return { ok: false, reason: "invalid XML" };
-  const args: Record<string, unknown> = {};
-  const child = /<([a-z0-9_]+)>([\s\S]*?)<\/\1>/g;
-  for (const match of body.matchAll(child)) {
-    const key = match[1];
-    const value = match[2];
-    if (!key || value === undefined) continue;
-    args[key] = value;
-  }
-  return { ok: true, call: { name, arguments: args } };
-}
-
 function parseJson(raw: string, policy: Policy): Parsed {
-  if (policy.rejectDuplicateKeys && duplicateKey(raw)) {
-    return { ok: false, reason: "duplicate key" };
+  if (policy.strictJson) {
+    const parsed = parseStrict(raw);
+    if (!parsed.ok) return parsed;
+    return callFromValue(parsed.value, policy);
   }
-  const direct = tryParseCall(raw, policy.unwrapStringArguments);
+  const direct = tryNativeCall(raw, policy);
   if (direct.ok) return direct;
-  if (policy.repairTrailingCommas) {
-    const repaired = tryParseCall(
-      stripTrailingCommas(raw),
-      policy.unwrapStringArguments,
-    );
-    if (repaired.ok) return repaired;
-    return { ok: false, reason: "truncated or invalid JSON" };
-  }
   if (policy.executeTruncatedJson && !raw.trimEnd().endsWith("}")) {
     return parseTruncated(raw);
   }
   return { ok: false, reason: "invalid JSON" };
 }
 
-// A comma before } or ] is trailing only outside a string. ",}" inside a
-// value has to stay, or the repair writes different bytes than the model sent.
-function stripTrailingCommas(raw: string): string {
-  let out = "";
-  let inString = false;
-  let escaped = false;
-  for (let index = 0; index < raw.length; index += 1) {
-    const char = raw[index];
-    if (char === undefined) break;
-    if (inString) {
-      out += char;
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
-      if (char === "\\") {
-        escaped = true;
-        continue;
-      }
-      if (char === '"') inString = false;
-      continue;
-    }
-    if (char === '"') {
-      inString = true;
-      out += char;
-      continue;
-    }
-    if (char === ",") {
-      const closer = raw[skipSpace(raw, index + 1)];
-      if (closer === "}" || closer === "]") continue;
-    }
-    out += char;
+function parseStrict(
+  text: string,
+): { ok: true; value: unknown } | { ok: false; reason: string } {
+  const parsed = parseStrictJson(text, {
+    allowTrailingCommas: true,
+    rejectDuplicateKeys: true,
+    maxDepth: MAX_JSON_DEPTH,
+  });
+  if (parsed.ok) return parsed;
+  return {
+    ok: false,
+    reason:
+      parsed.reason === "invalid JSON"
+        ? "truncated or invalid JSON"
+        : parsed.reason,
+  };
+}
+
+function tryNativeCall(raw: string, policy: Policy): Parsed {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: "invalid JSON" };
   }
-  return out;
+  return callFromValue(value, policy);
 }
 
 function parseTruncated(raw: string): Parsed {
@@ -209,27 +194,21 @@ function parseTruncated(raw: string): Parsed {
   return { ok: true, call: { name, arguments: args } };
 }
 
-function tryParseCall(raw: string, unwrapString = false): Parsed {
-  try {
-    return callFromValue(parseUnknown(raw), unwrapString);
-  } catch {
-    return { ok: false, reason: "invalid JSON" };
-  }
-}
-
-function parseUnknown(raw: string): unknown {
-  return JSON.parse(raw);
-}
-
-function callFromValue(value: unknown, unwrapString: boolean): Parsed {
+function callFromValue(value: unknown, policy: Policy): Parsed {
   if (typeof value !== "object" || value === null) {
     return { ok: false, reason: "truncated or invalid JSON" };
   }
-  if (!("name" in value) || !("arguments" in value)) {
+  if (!Object.hasOwn(value, "name") || !Object.hasOwn(value, "arguments")) {
     return { ok: false, reason: "truncated or invalid JSON" };
   }
-  const name = value.name;
-  const args = unwrapString ? unwrapOnce(value.arguments) : value.arguments;
+  const name = "name" in value ? value.name : undefined;
+  const given = "arguments" in value ? value.arguments : undefined;
+  let args = given;
+  if (policy.unwrapStringArguments && typeof given === "string") {
+    const inner = unwrapOnce(given);
+    if (!inner.ok) return inner;
+    args = inner.value;
+  }
   if (
     typeof name !== "string" ||
     typeof args !== "object" ||
@@ -240,164 +219,25 @@ function callFromValue(value: unknown, unwrapString: boolean): Parsed {
   }
   const argumentsRecord: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(args)) {
-    argumentsRecord[key] = entry;
+    if (policy.keepArgumentShape) setOwn(argumentsRecord, key, entry);
+    // Plain assignment. A key named __proto__ becomes the prototype.
+    else argumentsRecord[key] = entry;
   }
   return { ok: true, call: { name, arguments: argumentsRecord } };
 }
 
-// Some providers send `arguments` as a JSON string. Decode it one level only.
+// Some providers send `arguments` as a JSON string. Decode it one level only,
+// with the same parser, so a duplicate key inside the string is refused too.
 // A string that decodes to another string stays a string and is refused.
-function unwrapOnce(args: unknown): unknown {
-  if (typeof args !== "string") return args;
-  try {
-    return parseUnknown(args);
-  } catch {
-    return args;
+function unwrapOnce(
+  args: string,
+): { ok: true; value: unknown } | { ok: false; reason: string } {
+  const inner = parseStrict(args);
+  if (inner.ok) return inner;
+  if (inner.reason === "truncated or invalid JSON") {
+    return { ok: true, value: args };
   }
-}
-
-// Walk every object and compare decoded keys. A repeat at any depth refuses
-// the call before JSON.parse. A JSON-string arguments value is walked too.
-function duplicateKey(json: string): boolean {
-  const scanned = scanValue(json, skipSpace(json, 0));
-  return scanned?.duplicate === true;
-}
-
-type Scan = { next: number; duplicate: boolean };
-type Step = { done: boolean; next: number };
-
-function scanValue(json: string, index: number): Scan | null {
-  const char = json[index];
-  if (char === "{") return scanObject(json, index);
-  if (char === "[") return scanArray(json, index);
-  if (char === '"') {
-    const text = readString(json, index);
-    if (!text) return null;
-    return { next: text.next, duplicate: false };
-  }
-  if (char === "-" || isDigit(char)) return scanNumber(json, index);
-  if (json.startsWith("true", index)) return scanLiteral(json, index, "true");
-  if (json.startsWith("false", index)) return scanLiteral(json, index, "false");
-  if (json.startsWith("null", index)) return scanLiteral(json, index, "null");
-  return null;
-}
-
-function scanObject(json: string, start: number): Scan | null {
-  const keys = new Set<string>();
-  let index = skipSpace(json, start + 1);
-  if (json[index] === "}") return { next: index + 1, duplicate: false };
-  while (index < json.length) {
-    if (json[index] !== '"') return null;
-    const key = readString(json, index);
-    if (!key) return null;
-    if (keys.has(key.value)) return { next: key.next, duplicate: true };
-    keys.add(key.value);
-    index = skipSpace(json, key.next);
-    if (json[index] !== ":") return null;
-    index = skipSpace(json, index + 1);
-    const value = scanMember(json, index, key.value);
-    if (!value) return null;
-    if (value.duplicate) return value;
-    const step = afterItem(json, value.next, "}");
-    if (!step) return null;
-    if (step.done) return { next: step.next, duplicate: false };
-    index = step.next;
-  }
-  return null;
-}
-
-function scanArray(json: string, start: number): Scan | null {
-  let index = skipSpace(json, start + 1);
-  if (json[index] === "]") return { next: index + 1, duplicate: false };
-  while (index < json.length) {
-    const value = scanValue(json, index);
-    if (!value) return null;
-    if (value.duplicate) return value;
-    const step = afterItem(json, value.next, "]");
-    if (!step) return null;
-    if (step.done) return { next: step.next, duplicate: false };
-    index = step.next;
-  }
-  return null;
-}
-
-// arguments may itself be a JSON string. Walk that text before it is parsed.
-function scanMember(json: string, index: number, key: string): Scan | null {
-  if (key === "arguments" && json[index] === '"') {
-    const text = readString(json, index);
-    if (!text) return null;
-    if (duplicateKey(text.value)) return { next: text.next, duplicate: true };
-    return { next: text.next, duplicate: false };
-  }
-  return scanValue(json, index);
-}
-
-function afterItem(json: string, index: number, close: "}" | "]"): Step | null {
-  const cursor = skipSpace(json, index);
-  if (json[cursor] === ",") {
-    const next = skipSpace(json, cursor + 1);
-    if (json[next] === close) return { done: true, next: next + 1 };
-    return { done: false, next };
-  }
-  if (json[cursor] === close) return { done: true, next: cursor + 1 };
-  return null;
-}
-
-function scanNumber(json: string, index: number): Scan | null {
-  let cursor = index;
-  if (json[cursor] === "-") cursor += 1;
-  const first = json[cursor];
-  if (first === "0") {
-    cursor += 1;
-  } else if (isDigit(first)) {
-    while (isDigit(json[cursor])) cursor += 1;
-  } else {
-    return null;
-  }
-  if (json[cursor] === ".") {
-    cursor += 1;
-    const mark = cursor;
-    while (isDigit(json[cursor])) cursor += 1;
-    if (cursor === mark) return null;
-  }
-  if (json[cursor] === "e" || json[cursor] === "E") {
-    cursor += 1;
-    if (json[cursor] === "+" || json[cursor] === "-") cursor += 1;
-    const mark = cursor;
-    while (isDigit(json[cursor])) cursor += 1;
-    if (cursor === mark) return null;
-  }
-  return { next: cursor, duplicate: false };
-}
-
-function scanLiteral(
-  json: string,
-  index: number,
-  literal: string,
-): Scan | null {
-  if (!json.startsWith(literal, index)) return null;
-  const after = json[index + literal.length];
-  if (after !== undefined && isWord(after)) return null;
-  return { next: index + literal.length, duplicate: false };
-}
-
-function isDigit(char: string | undefined): boolean {
-  return char !== undefined && char >= "0" && char <= "9";
-}
-
-function isWord(char: string): boolean {
-  return (
-    (char >= "a" && char <= "z") ||
-    (char >= "A" && char <= "Z") ||
-    char === "_" ||
-    isDigit(char)
-  );
-}
-
-function skipSpace(json: string, index: number): number {
-  let cursor = index;
-  while (isSpace(json[cursor])) cursor += 1;
-  return cursor;
+  return inner;
 }
 
 function toolCallInText(text: string): ToolCall | null {
@@ -405,159 +245,149 @@ function toolCallInText(text: string): ToolCall | null {
   if (start < 0) return null;
   const slice = matchObject(text, start);
   if (!slice) return null;
-  const parsed = tryParseCall(slice);
+  const parsed = tryNativeCall(slice, naivePolicy);
   return parsed.ok ? parsed.call : null;
 }
 
 function matchObject(text: string, start: number): string | null {
-  if (text[start] !== "{") return null;
   let depth = 0;
-  let index = start;
-  while (index < text.length) {
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
     const char = text[index];
-    if (char === '"') {
-      const token = readString(text, index);
-      if (!token) return null;
-      index = token.next;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
       continue;
     }
-    if (char === "{") depth += 1;
-    if (char === "}") {
+    if (char === '"') inString = true;
+    else if (char === "{") depth += 1;
+    else if (char === "}") {
       depth -= 1;
       if (depth === 0) return text.slice(start, index + 1);
     }
-    index += 1;
   }
   return null;
 }
 
-function readString(
-  json: string,
-  start: number,
-): { value: string; next: number } | null {
-  if (json[start] !== '"') return null;
-  let value = "";
-  let index = start + 1;
-  while (index < json.length) {
-    const char = json[index];
-    if (char === "\\") {
-      const escaped = json[index + 1];
-      if (escaped === undefined) return null;
-      if (escaped === "u") {
-        const hex = json.slice(index + 2, index + 6);
-        if (!/^[0-9a-fA-F]{4}$/.test(hex)) return null;
-        value += String.fromCharCode(Number.parseInt(hex, 16));
-        index += 6;
-        continue;
-      }
-      const mapped = escapedChar(escaped);
-      if (mapped === null) return null;
-      value += mapped;
-      index += 2;
-      continue;
-    }
-    if (char === '"') return { value, next: index + 1 };
-    if (char === undefined) return null;
-    value += char;
-    index += 1;
-  }
-  return null;
-}
+type Tool = (target: string, content: string) => string;
 
-function escapedChar(escaped: string): string | null {
-  if (escaped === '"') return '"';
-  if (escaped === "\\") return "\\";
-  if (escaped === "/") return "/";
-  if (escaped === "b") return "\b";
-  if (escaped === "f") return "\f";
-  if (escaped === "n") return "\n";
-  if (escaped === "r") return "\r";
-  if (escaped === "t") return "\t";
-  return null;
-}
+const TOOLS: Record<string, Tool> = {
+  read_file(target) {
+    const stat = statSync(target, { throwIfNoEntry: false });
+    if (!stat?.isFile()) return "error: not found";
+    return readFileSync(target, "utf8");
+  },
+  write_file(target, content) {
+    writeFileSync(target, content, "utf8");
+    return "wrote";
+  },
+};
 
-function hasInvisible(value: string): boolean {
-  for (const char of value) {
-    const code = char.codePointAt(0);
-    if (code !== undefined && INVISIBLE.has(code)) return true;
-  }
-  return false;
-}
-
-function isSpace(char: string | undefined): boolean {
-  return char === " " || char === "\n" || char === "\r" || char === "\t";
+function findTool(name: string, policy: Policy): Tool | undefined {
+  if (policy.ownToolNamesOnly && !Object.hasOwn(TOOLS, name)) return undefined;
+  const tool: unknown = TOOLS[name];
+  return typeof tool === "function" ? (tool as Tool) : undefined;
 }
 
 function executeCall(
   call: ToolCall,
   sandboxDir: string,
-  jail: boolean,
+  policy: Policy,
 ): RunOutput {
-  if (call.name !== "read_file" && call.name !== "write_file") {
-    return { status: "refused", reason: "unknown tool" };
-  }
-  const userPath = call.arguments.path;
-  if (typeof userPath !== "string")
+  const tool = findTool(call.name, policy);
+  if (!tool) return { status: "refused", reason: "unknown tool" };
+  const userPath = argumentText(call.arguments.path, policy);
+  if (userPath === undefined) {
     return { status: "refused", reason: "missing argument" };
-  if (
-    call.name === "write_file" &&
-    typeof call.arguments.content !== "string"
-  ) {
+  }
+  const content = argumentText(call.arguments.content, policy);
+  if (call.name === "write_file" && content === undefined) {
     return { status: "refused", reason: "missing argument" };
   }
   const encoding = call.arguments.encoding;
   if (
     encoding !== undefined &&
-    (typeof encoding !== "string" || encoding.trim() !== "utf-8")
+    (typeof encoding !== "string" || !isUtf8(trimSpace(encoding)))
   ) {
     return { status: "refused", reason: "encoding not allowed" };
   }
-  const resolved = resolveUserPath(sandboxDir, userPath, jail);
-  if (typeof resolved !== "string") return resolved;
-  if (call.name === "read_file") {
-    if (!existsSync(resolved) || !statSync(resolved).isFile()) {
-      return { status: "executed", call, result: "error: not found" };
-    }
-    return { status: "executed", call, result: readFileSync(resolved, "utf8") };
+  let resolved = path.resolve(sandboxDir, userPath);
+  if (policy.jailPaths) {
+    const jailed = resolveInside(sandboxDir, userPath);
+    if (!jailed.ok) return { status: "refused", reason: jailed.reason };
+    resolved = jailed.path;
   }
-  const content = call.arguments.content;
-  if (typeof content !== "string")
-    return { status: "refused", reason: "missing argument" };
-  writeFileSync(resolved, content, "utf8");
-  return { status: "executed", call, result: "wrote" };
+  if (policy.guardWrites && call.name === "write_file") {
+    const reason = writeGuard(resolved, content ?? "");
+    if (reason !== undefined) return { status: "refused", reason };
+  }
+  // A tool that fails hands the failure back as its result, the way an agent
+  // loop reports a tool error to the model. The loop also turns whatever the
+  // tool returned into text.
+  try {
+    return {
+      status: "executed",
+      call,
+      result: String(tool(resolved, content ?? "")),
+    };
+  } catch (error) {
+    return { status: "executed", call, result: `error: ${errorCode(error)}` };
+  }
 }
 
-function isOutside(root: string, target: string): boolean {
-  const relative = path.relative(root, target);
-  if (path.isAbsolute(relative)) return true;
-  return relative === ".." || relative.startsWith(`..${path.sep}`);
+// A lone surrogate has no UTF-8 form. Node writes U+FFFD in its place, so the
+// file would hold bytes the model did not send. Opening a FIFO for writing
+// blocks until something reads it. A file with a second hard link may be the
+// same file as one outside the workspace.
+function writeGuard(target: string, content: string): string | undefined {
+  if (/\p{Cs}/u.test(content)) return "content is not valid Unicode";
+  let stat: ReturnType<typeof statSync> | undefined;
+  try {
+    stat = statSync(target, { throwIfNoEntry: false });
+  } catch {
+    return undefined;
+  }
+  if (stat === undefined) return undefined;
+  if (!stat.isFile()) return "write target is not a regular file";
+  if (stat.nlink > 1) return "write target has more than one hard link";
+  return undefined;
 }
 
-function resolveUserPath(
-  workspace: string,
-  userPath: string,
-  jail: boolean,
-): string | RunOutput {
-  if (!jail) return path.resolve(workspace, userPath);
-  if (hasInvisible(userPath)) {
-    return { status: "refused", reason: "path contains invisible characters" };
+// JavaScript trim() also removes U+FEFF, the no-break space, and the line
+// separators. Trimming those turns a path the jail would refuse into one it
+// accepts. Only the four JSON whitespace characters are padding.
+const LEADING_SPACE = /^[ \t\r\n]+/;
+const TRAILING_SPACE = /[ \t\r\n]+$/;
+
+function trimSpace(value: string): string {
+  return value.replace(LEADING_SPACE, "").replace(TRAILING_SPACE, "");
+}
+
+function isUtf8(encoding: string): boolean {
+  const name = encoding.toLowerCase();
+  return name === "utf-8" || name === "utf8";
+}
+
+// The tools take strings. Coercing anything else to a string turns
+// ["notes.txt"] into a path and {} into file content.
+function argumentText(value: unknown, policy: Policy): string | undefined {
+  if (typeof value === "string") return value;
+  if (value === undefined || value === null || policy.keepArgumentShape) {
+    return undefined;
   }
-  if (path.isAbsolute(userPath))
-    return { status: "refused", reason: "absolute path rejected" };
-  if (userPath.split(/[\\/]/).includes("..")) {
-    return { status: "refused", reason: "parent segment rejected" };
+  return String(value);
+}
+
+function errorCode(error: unknown): string {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+  ) {
+    return error.code;
   }
-  const resolved = path.resolve(workspace, userPath);
-  if (isOutside(workspace, resolved)) {
-    return { status: "refused", reason: "path escapes workspace" };
-  }
-  const realWorkspace = realpathSync(workspace);
-  const anchor = existsSync(resolved) ? resolved : path.dirname(resolved);
-  if (existsSync(anchor)) {
-    const realAnchor = realpathSync(anchor);
-    if (isOutside(realWorkspace, realAnchor)) {
-      return { status: "refused", reason: "symlink escapes workspace" };
-    }
-  }
-  return resolved;
+  return "failed";
 }
