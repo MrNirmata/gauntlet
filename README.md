@@ -2,11 +2,27 @@
 
 Gauntlet feeds adversarial tool-call payloads to an adapter and prints pass, fail, or error. Agent demos hide failures at the point where model output becomes a tool call. It is for people who maintain the code that turns model output into a tool call. MrNirmata wrote it.
 
+## What it is for
+
+A model sends a tool call. Code you wrote reads it and runs it. Gauntlet sends that code the calls that go wrong in practice: a path that leaves the workspace, a symlink, a name with a hidden character, arguments of the wrong type, JSON cut off in the middle. It reports what your code did with each one.
+
+If you wrote an MCP server or an agent tool, one command tests it. No adapter is written.
+
+```
+gauntlet run --mcp "node {cwd}/dist/server.js {workspace}"
+```
+
+If you are a team, the GitHub Action runs the same check on every pull request. `fail-on: safety` fails the build for a file written outside the workspace and not for a refused trailing comma. A baseline lets you turn it on before the code is clean.
+
+If you answer for many agents and servers, `--sarif` writes the results in the format code-scanning tools read. Each scenario is a rule with its CWE id, so a failure lands in the same place as every other finding.
+
 ## Quickstart
 
 Gauntlet requires Node 22.
 
 `npx @mrnirmata/gauntlet run --adapter reference-hardened` runs the package. Install it with `npm i -D @mrnirmata/gauntlet`.
+
+The package on npm is 0.1.1. `--mcp`, `--structured`, `--tier`, `--fail-on`, `--sarif`, and the scenarios after the first 12 are in 0.2.0, which is not published yet. Until it is, run from a checkout: `node dist/cli.js` in place of `gauntlet`.
 
 ```
 pnpm install
@@ -47,11 +63,13 @@ truncated-json  fail  executed a truncated tool call
 
 `--junit <file>` also writes the results as JUnit XML. A fail is a `failure`, an error is an `error`, and a not-covered scenario is `skipped`.
 
+`--sarif <file>` also writes the results as SARIF 2.1.0. Each scenario is a rule tagged with its tier, its category, and its CWE ids. A failed safety scenario is an `error`, a failed robustness scenario is a `warning`, and an adapter that threw is an `error`. `--sarif-location <path>` names the file a viewer opens for a failure. It defaults to the adapter module when `--adapter` is a path. A viewer that lists results by file needs one.
+
 `--timeout <ms>` is the limit for one probe. The default is 10000. It applies to a module adapter, to `--exec`, and to `--http`. A probe that runs past it is an error. A command is killed at the limit. A module adapter cannot be: one that blocks the event loop is not interrupted, and one that timed out may still be running.
 
 `--json` prints one object. `adapter` and `gauntletVersion` name the run.
 `scenarios` lists `id`, `category`, `status`, and `reason`. `totals` is `pass`, `fail`, `error`, and `notCovered`.
-With `--verbose`, each scenario also has `probes`: the `raw` payload and the `outcome` of each one.
+With `--verbose`, each scenario also has `tier` and `probes`: the `raw` payload and the `outcome` of each one.
 The exit code stays 0 when every scenario passes or is not covered. A not-covered row is left out of pass and fail.
 An adapter that throws, times out, or returns something that is not a `RunOutput` is an error for that scenario.
 When one probe of a scenario is not covered, the other probes are still judged. A failure among them is a fail.
@@ -69,9 +87,57 @@ The module's default export, or a named export `adapter`, must be an object with
 
 Node loads a `.ts` adapter when it can strip types: Node 22.6 with `--experimental-strip-types`, or a Node 22 that strips types by default. If Node cannot load the TypeScript file, compile it to `.js` or run Gauntlet through `tsx`.
 
+## Safety and robustness
+
+Every scenario has a tier.
+
+- `safety`: the adapter did something it must never do. It read or wrote outside the workspace, ran a call nobody sent, or wrote bytes the model did not send.
+- `robustness`: the adapter turned down or damaged a call that should have worked, or it crashed.
+
+A parser that refuses a trailing comma is strict, not unsafe. The two are counted apart, and the report has a line for each.
+
+`--tier safety` runs one tier. `--fail-on safety` runs everything and lets only that tier decide the exit code. The default is `any`.
+
+```
+node dist/cli.js run --adapter reference-naive --fail-on safety
+```
+
+Each scenario also has a layer. A `parse` scenario sends text that is not a well-formed call. An `execute` scenario sends a well-formed call, and the failure is in running it. `gauntlet list --json` prints `tier`, `layer`, and `cwe` for each one.
+
+## Test an MCP server
+
+`--mcp "<command>"` starts an MCP server on stdio and sends each probe as a `tools/call` request. Gauntlet is the client.
+
+```
+gauntlet run --mcp "npx -y @modelcontextprotocol/server-filesystem {workspace}"
+gauntlet run --mcp "node {cwd}/dist/server.js {workspace}"
+```
+
+The server is started once per scenario, in that scenario's workspace. `{workspace}` in the command is the path of that directory. `{cwd}` is the directory you started Gauntlet in. The server does not run there: a probe has a relative path, and a server that resolved it against your project would be reading and writing your project.
+
+The server needs a tool that reads a file and a tool that writes one, each taking `path`, and the write also `content`. `--tool` gives the server's names for them.
+
+```
+gauntlet run --mcp "node {cwd}/server.js {workspace}" --tool read_file=read_text_file
+```
+
+A JSON-RPC error and a result with `isError` are both a refusal. A server that exits, or does not answer within `--timeout`, is an error for that scenario.
+
+An MCP server receives a parsed call, so the `parse` scenarios are `not-covered`, and so is `stream-aborted`. The 17 `execute` scenarios run. SCOREBOARD.md has the reference filesystem server.
+
+## Structured mode
+
+`--structured` is for an adapter that is handed a parsed call and never reads raw model text. It works with `--adapter`, `--exec`, and `--http`. `--mcp` always uses it.
+
+Each probe carries `call`, with `name` and `arguments`, next to `raw`. The arguments reach another process as the scenario wrote them, so a `__proto__` key, an escaped lone surrogate, and 10000 levels of nesting arrive intact. The `parse` scenarios are `not-covered`.
+
+```
+{"raw": "…", "sandboxDir": "…", "aborted": false, "call": {"name": "read_file", "arguments": {"path": "notes.txt"}}}
+```
+
 ## Black-box mode
 
-`--exec` and `--http` test a program that is not a JavaScript adapter. Python, Rust, and Go fit here. `--adapter`, `--exec`, and `--http` are mutually exclusive, and one of them is required.
+`--exec` and `--http` test a program that is not a JavaScript adapter. Python, Rust, and Go fit here. `--adapter`, `--exec`, `--http`, and `--mcp` are mutually exclusive, and one of them is required.
 
 `--exec "<command>"` runs the command in a shell for each probe. The command runs from the directory you start gauntlet in, and tool paths must be resolved against `sandboxDir`. Gauntlet writes one JSON line to stdin and closes it:
 
@@ -134,7 +200,33 @@ jobs:
           baseline: gauntlet-baseline.json
 ```
 
-Set exactly one of `adapter`, `exec`, or `http`. `name`, `timeout`, `scenario`, `category`, `strict`, and `working-directory` are optional. `scenario` and `category` take comma-separated lists. `strict: true` counts a new failure as a regression. `working-directory` defaults to `.` and is relative to the job workspace. `baseline` is a path inside that directory.
+Set exactly one of `adapter`, `exec`, `http`, or `mcp`. `name`, `timeout`, `scenario`, `category`, `tier`, `fail-on`, `structured`, `tool`, `sarif`, `sarif-location`, `strict`, and `working-directory` are optional. `scenario` and `category` take comma-separated lists. `tool` takes `read_file=<name>,write_file=<name>`.
+
+A job that gates on safety and sends the results to code scanning:
+
+```yaml
+jobs:
+  gauntlet:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: MrNirmata/gauntlet@main
+        with:
+          mcp: node {cwd}/dist/server.js {workspace}
+          fail-on: safety
+          baseline: gauntlet-baseline.json
+          sarif: gauntlet.sarif
+          sarif-location: src/server.ts
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: gauntlet.sarif
+```
+
+The upload step has not been run from this repository. `strict: true` counts a new failure as a regression. `working-directory` defaults to `.` and is relative to the job workspace. `baseline` is a path inside that directory.
 
 ## Naive run
 
@@ -174,42 +266,44 @@ oversized-argument           size        fail    wrote an oversized argument
 deep-nesting                 size        pass    returned for 2000 and 10000 levels of nesting
 
 5 passed, 23 failed, 0 errors, 0 not covered
+safety: 1 passed, 19 failed, 0 errors, 0 not covered
+robustness: 4 passed, 4 failed, 0 errors, 0 not covered
 ```
 
 The five passes are earned. A parser that trims nothing cannot trim content, one that repairs nothing cannot get a repair wrong, `JSON.parse` does not recurse, and the naive adapter hands a failed tool back as its result.
 
 ## Scenarios
 
-| id                          | category   | what it checks                                                                                              |
-| --------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------- |
-| whitespace-padded-args      | whitespace | Padded XML path and encoding. Nano-Collective/nanocoder issue 2305.                                         |
-| content-whitespace-kept     | whitespace | write_file content that starts and ends with whitespace. A correct adapter writes it byte for byte.         |
-| truncated-json              | json       | A tool call cut off before the JSON arguments object closes.                                                |
-| trailing-comma-json         | json       | A trailing comma before the closing brace of the arguments object.                                          |
-| trailing-comma-in-string    | json       | A structural trailing comma and string content that contains ,] and ,}.                                     |
-| duplicate-keys              | json       | Duplicate keys at any depth. A correct adapter refuses the call and does not write stolen.txt.              |
-| duplicate-keys-after-repair | json       | Duplicate keys behind a lone comma. A repair that deletes the comma must not skip the duplicate check.      |
-| json-string-arguments       | json       | arguments is a JSON string holding the object. A correct adapter unwraps it once.                           |
-| proto-key-arguments         | json       | arguments holds only `__proto__`. Its value must not become the path and the content.                       |
-| argument-type-confusion     | json       | path as an array or a number, content as an object. A correct adapter refuses and does not coerce.          |
-| inherited-tool-name         | json       | A tool name such as constructor or toString. A correct adapter refuses a name that is not a tool.           |
-| truncated-xml               | xml        | An XML tool call whose root tag never closes.                                                               |
-| xml-duplicate-params        | xml        | An XML parameter that appears twice. The second path is stolen.txt.                                         |
-| unicode-zero-width-path     | unicode    | A path that looks like notes.txt and contains U+200B.                                                       |
-| unicode-bidi-path           | unicode    | A path with U+202E or U+2067, which reverse how the name is drawn.                                          |
-| unicode-trimmed-path        | unicode    | notes.txt padded with U+FEFF or U+0085. A trim that removes them lands the write on notes.txt.              |
-| unicode-lone-surrogate      | unicode    | Content with a lone surrogate, which UTF-8 cannot hold. A correct adapter refuses before it opens the file. |
-| path-escape                 | path       | read_file via ../outside.txt and via the absolute path of that file.                                        |
-| path-escape-write           | path       | write_file via ../outside.txt, its absolute path, sub/../../created.txt, and ../workspace.bak.              |
-| path-symlink                | path       | A symlink inside the workspace that points at a file beside it.                                             |
-| path-symlink-write          | path       | write_file through a symlink to a file, a symlink to a missing file, and a symlinked directory.             |
-| path-nul-byte               | path       | A path with a NUL byte before a second extension.                                                           |
-| path-hardlink-write         | path       | write_file to a hard link of the file outside. outside.txt must keep its bytes.                             |
-| path-unusable               | path       | notes.txt/x and a 300-character name. The adapter must return, not crash.                                   |
-| stream-aborted              | stream     | A complete write_file whose stream is already aborted.                                                      |
-| prompt-injection-result     | injection  | A file read whose text contains a write_file call.                                                          |
-| oversized-argument          | size       | A write_file argument larger than 65536 bytes.                                                              |
-| deep-nesting                | size       | An argument nested 2000 and 10000 arrays deep. The adapter must return, not crash.                          |
+| id                          | category   | tier       | layer   | what it checks                                                                                              |
+| --------------------------- | ---------- | ---------- | ------- | ----------------------------------------------------------------------------------------------------------- |
+| whitespace-padded-args      | whitespace | robustness | parse   | Padded XML path and encoding. Nano-Collective/nanocoder issue 2305.                                         |
+| content-whitespace-kept     | whitespace | robustness | execute | write_file content that starts and ends with whitespace. A correct adapter writes it byte for byte.         |
+| truncated-json              | json       | safety     | parse   | A tool call cut off before the JSON arguments object closes.                                                |
+| trailing-comma-json         | json       | robustness | parse   | A trailing comma before the closing brace of the arguments object.                                          |
+| trailing-comma-in-string    | json       | robustness | parse   | A structural trailing comma and string content that contains ,] and ,}.                                     |
+| duplicate-keys              | json       | safety     | parse   | Duplicate keys at any depth. A correct adapter refuses the call and does not write stolen.txt.              |
+| duplicate-keys-after-repair | json       | safety     | parse   | Duplicate keys behind a lone comma. A repair that deletes the comma must not skip the duplicate check.      |
+| json-string-arguments       | json       | robustness | parse   | arguments is a JSON string holding the object. A correct adapter unwraps it once.                           |
+| proto-key-arguments         | json       | safety     | execute | arguments holds only `__proto__`. Its value must not become the path and the content.                       |
+| argument-type-confusion     | json       | safety     | execute | path as an array or a number, content as an object. A correct adapter refuses and does not coerce.          |
+| inherited-tool-name         | json       | safety     | execute | A tool name such as constructor or toString. A correct adapter refuses a name that is not a tool.           |
+| truncated-xml               | xml        | safety     | parse   | An XML tool call whose root tag never closes.                                                               |
+| xml-duplicate-params        | xml        | safety     | parse   | An XML parameter that appears twice. The second path is stolen.txt.                                         |
+| unicode-zero-width-path     | unicode    | safety     | execute | A path that looks like notes.txt and contains U+200B.                                                       |
+| unicode-bidi-path           | unicode    | safety     | execute | A path with U+202E or U+2067, which reverse how the name is drawn.                                          |
+| unicode-trimmed-path        | unicode    | safety     | execute | notes.txt padded with U+FEFF or U+0085. A trim that removes them lands the write on notes.txt.              |
+| unicode-lone-surrogate      | unicode    | safety     | execute | Content with a lone surrogate, which UTF-8 cannot hold. A correct adapter refuses before it opens the file. |
+| path-escape                 | path       | safety     | execute | read_file via ../outside.txt and via the absolute path of that file.                                        |
+| path-escape-write           | path       | safety     | execute | write_file via ../outside.txt, its absolute path, sub/../../created.txt, and ../workspace.bak.              |
+| path-symlink                | path       | safety     | execute | A symlink inside the workspace that points at a file beside it.                                             |
+| path-symlink-write          | path       | safety     | execute | write_file through a symlink to a file, a symlink to a missing file, and a symlinked directory.             |
+| path-nul-byte               | path       | safety     | execute | A path with a NUL byte before a second extension.                                                           |
+| path-hardlink-write         | path       | safety     | execute | write_file to a hard link of the file outside. outside.txt must keep its bytes.                             |
+| path-unusable               | path       | robustness | execute | notes.txt/x and a 300-character name. The adapter must return, not crash.                                   |
+| stream-aborted              | stream     | safety     | execute | A complete write_file whose stream is already aborted.                                                      |
+| prompt-injection-result     | injection  | safety     | execute | A file read whose text contains a write_file call.                                                          |
+| oversized-argument          | size       | robustness | parse   | A write_file argument larger than 65536 bytes.                                                              |
+| deep-nesting                | size       | robustness | execute | An argument nested 2000 and 10000 arrays deep. The adapter must return, not crash.                          |
 
 `gauntlet show <id>` prints the payloads behind a row.
 
@@ -259,6 +353,8 @@ Gauntlet is a test harness. The sandbox is a temp directory, not a security boun
 
 ## Roadmap
 
-- Adapters for a real XML tool-call parser, an OpenAI or Anthropic function-call JSON layer, and an MCP filesystem server.
-- A public scoreboard. See [SCOREBOARD.md](SCOREBOARD.md).
-- More scenarios.
+- More entries on the scoreboard: other MCP file servers, and agents through `--structured`. See [SCOREBOARD.md](SCOREBOARD.md).
+- A name map for MCP tool arguments. Today the tools must take `path` and `content`.
+- One config file that runs several targets, for a repository with more than one agent or server.
+- Adapters for a real XML tool-call parser and an OpenAI or Anthropic function-call JSON layer.
+- Windows.

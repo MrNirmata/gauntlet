@@ -327,3 +327,35 @@ test("category is passed through as a filter", () => {
   expect(result.summary).toContain("truncated-xml");
   expect(result.summary).not.toContain("truncated-json");
 });
+
+test("mcp, tool, fail-on, and sarif are passed through", async () => {
+  await withDir(async (dir) => {
+    const server = path.join(
+      process.cwd(),
+      "test",
+      "fixtures",
+      "mcp-reference.mjs",
+    );
+    const result = runAction(
+      {
+        INPUT_MCP: `"${process.execPath}" "${server}" naive {workspace} renamed`,
+        INPUT_TOOL: "read_file=read_text_file,write_file=write_text_file",
+        INPUT_NAME: "naive-server",
+        INPUT_CATEGORY: "path",
+        INPUT_FAIL_ON: "robustness",
+        INPUT_SARIF: "gauntlet.sarif",
+        INPUT_SARIF_LOCATION: "server/index.ts",
+      },
+      dir,
+    );
+    // Six path scenarios fail, all of them safety, and robustness decides.
+    expect(result.code).toBe(0);
+    expect(result.outputs.get("fail")).toBe("6");
+    expect(result.outputs.get("pass")).toBe("1");
+    const sarif = JSON.parse(
+      readFileSync(path.join(dir, "gauntlet.sarif"), "utf8"),
+    ) as { runs: { automationDetails: { id: string }; results: unknown[] }[] };
+    expect(sarif.runs[0]?.automationDetails.id).toBe("gauntlet/naive-server");
+    expect(sarif.runs[0]?.results).toHaveLength(7);
+  });
+});

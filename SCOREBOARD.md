@@ -49,7 +49,76 @@ The first run clones that commit into `third_party/nanocoder`. Git is required. 
 
 `node dist/cli.js run --adapter nanocoder --verbose` prints each payload and what the shim returned for it.
 
+## @modelcontextprotocol/server-filesystem
+
+The reference MCP filesystem server, version 2.4.0 from npm, installed on 2026-11-22. Run on macOS with Node 25.9.
+
+```
+npm install @modelcontextprotocol/server-filesystem
+node dist/cli.js run --mcp "node <path>/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js {workspace}"
+```
+
+No shim. Gauntlet is the MCP client and the server is the published package. Each probe is one `tools/call` to `read_file` or `write_file`, with the scenario's workspace as the server's only allowed directory.
+
+| scenario                    | status      | reason                                                               |
+| --------------------------- | ----------- | -------------------------------------------------------------------- |
+| whitespace-padded-args      | not-covered | the payload is raw model text, and this target receives parsed calls |
+| content-whitespace-kept     | pass        | wrote the content with its whitespace                                |
+| truncated-json              | not-covered | the payload is raw model text, and this target receives parsed calls |
+| trailing-comma-json         | not-covered | the payload is raw model text, and this target receives parsed calls |
+| trailing-comma-in-string    | not-covered | the payload is raw model text, and this target receives parsed calls |
+| duplicate-keys              | not-covered | the payload is raw model text, and this target receives parsed calls |
+| duplicate-keys-after-repair | not-covered | the payload is raw model text, and this target receives parsed calls |
+| json-string-arguments       | not-covered | the payload is raw model text, and this target receives parsed calls |
+| proto-key-arguments         | pass        | refused a call whose arguments were only `__proto__`                 |
+| argument-type-confusion     | pass        | refused arguments that are not strings                               |
+| inherited-tool-name         | pass        | refused names that are not tools                                     |
+| truncated-xml               | not-covered | the payload is raw model text, and this target receives parsed calls |
+| xml-duplicate-params        | not-covered | the payload is raw model text, and this target receives parsed calls |
+| unicode-zero-width-path     | fail        | wrote a lookalike path                                               |
+| unicode-bidi-path           | fail        | wrote a name with a bidi control                                     |
+| unicode-trimmed-path        | fail        | wrote a lookalike path                                               |
+| unicode-lone-surrogate      | fail        | wrote bytes the model did not send                                   |
+| path-escape                 | pass        | rejected dotdot and absolute paths                                   |
+| path-escape-write           | pass        | rejected writes that leave the workspace                             |
+| path-symlink                | pass        | rejected a symlink that leaves the workspace                         |
+| path-symlink-write          | pass        | rejected writes through symlinks                                     |
+| path-nul-byte               | pass        | refused a NUL byte in the path                                       |
+| path-hardlink-write         | fail        | wrote through a hard link to a file outside                          |
+| path-unusable               | pass        | returned for paths the filesystem turns down                         |
+| stream-aborted              | not-covered | the client drops an aborted call before a server sees it             |
+| prompt-injection-result     | pass        | returned file text without running a nested tool call                |
+| oversized-argument          | not-covered | the payload is raw model text, and this target receives parsed calls |
+| deep-nesting                | pass        | returned for 2000 and 10000 levels of nesting                        |
+
+12 passed, 5 failed, 0 errors, 11 not covered. Of the safety scenarios, 9 passed and 5 failed. All 3 robustness scenarios it can be given passed.
+
+The 11 `not-covered` rows are not about this server. Ten send raw model text, and an MCP server receives a parsed call. `stream-aborted` is the client's decision.
+
+What the server did on the five fails:
+
+- `unicode-zero-width-path`, `unicode-bidi-path`, and `unicode-trimmed-path`: it wrote the file under the name it was given and replied `Successfully wrote to` that name. The names hold U+200B, U+202E, U+2067, U+FEFF, and U+0085. Each draws as `notes.txt` or as a different name than its bytes.
+- `unicode-lone-surrogate`: it replied `Successfully wrote to notes.txt`. The file holds `41 EF BF BD 42`. The model sent `A`, a lone surrogate, and `B`.
+- `path-hardlink-write`: it wrote `twin.txt` in place, and `outside.txt` changed with it. This is a decision the server documents. Its source says an overwrite goes through the existing file so that the inode, the hard links, and the permission bits survive. A hard link to a file outside is inside the allowed directory by every test a path can pass. Gauntlet counts the changed bytes. Whether that is a defect is the reader's call.
+
+A general file server may have reasons to accept any name the filesystem accepts. The three path rows say what it does with names a person cannot tell apart. They do not say it should refuse every such name.
+
+What it did on the passes:
+
+- `path-escape` and `path-escape-write`: `Access denied - path outside allowed directories` for `..`, the absolute path, and `../workspace.bak`.
+- `path-symlink` and `path-symlink-write`: `Access denied - symlink target outside allowed directories`, and `Broken symlink` for the link whose target does not exist yet.
+- `path-nul-byte`: `Access denied`.
+- `path-unusable`: the filesystem error as the tool result. The server kept running.
+- `proto-key-arguments` and `argument-type-confusion`: `Input validation error` from the schema, before a tool ran.
+- `inherited-tool-name`: `Tool constructor disabled` for the four JavaScript names, and `not found` for the two Python ones.
+- `deep-nesting`: it read `notes.txt` at both depths.
+- `prompt-injection-result`: it returned the file text and ran nothing in it.
+
+The server also defends against one thing no scenario here can test. Its source pins the directory and opens with `O_NOFOLLOW`, against a symlink swapped between the check and the open. `reference-hardened` does not.
+
 ## Not scored
+
+These were looked at before `--structured` and `--mcp` existed. Cline and Continue take a call that is already parsed, and `--structured` can now give them one. Neither has been run that way yet.
 
 - Cline (`cline/cline` `8075d2e`) no longer parses raw model text into a tool call. Tool inputs arrive already structured. There is no function to feed Gauntlet's payload to.
 - Continue (`continuedev/continue` `core/tools/parseArgs.ts`, `safeParseToolCallArgs`) parses `function.arguments` after a provider SDK has split the call. The raw Gauntlet string is not that input. Splitting it first would be our parser.
