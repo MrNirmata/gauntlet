@@ -30,9 +30,11 @@ test("reference-hardened passes every scenario", async () => {
   expect(passed).toEqual(ids);
 });
 
-// A parser that does not repair is safe from a repair bug, and JSON.parse
-// does not recurse. Those are passes the naive adapter earns.
+// A parser that does not repair is safe from a repair bug, one that does not
+// trim cannot trim content, and JSON.parse does not recurse. Those are passes
+// the naive adapter earns.
 const NAIVE_PASSES = [
+  "content-whitespace-kept",
   "trailing-comma-in-string",
   "duplicate-keys-after-repair",
   "deep-nesting",
@@ -357,4 +359,58 @@ test("an escaped arguments key with unique keys still executes", async () => {
     call: { name: "write_file", arguments: { path: "out.txt", content: "ok" } },
   });
   expect(result.stolen).toBe(false);
+});
+
+test("content-whitespace-kept fails an adapter that trims every argument", async () => {
+  const scenario = scenarios.find(
+    (item) => item.id === "content-whitespace-kept",
+  );
+  if (!scenario) throw new Error("missing content-whitespace-kept scenario");
+  const trimsEverything: Adapter = {
+    name: "trims-everything",
+    async run(input) {
+      const raw = input.raw.replace(
+        /"content":"((?:[^"\\]|\\.)*)"/,
+        (_, body) =>
+          `"content":${JSON.stringify((JSON.parse(`"${body}"`) as string).trim())}`,
+      );
+      return referenceHardened.run({ ...input, raw });
+    },
+  };
+  const result = await runScenario(trimsEverything, scenario);
+  expect(result).toMatchObject({
+    status: "fail",
+    reason: "trimmed whitespace that belongs to the content",
+  });
+  const refuser: Adapter = {
+    name: "refuser",
+    run: () => Promise.resolve({ status: "refused", reason: "no" }),
+  };
+  expect(await runScenario(refuser, scenario)).toMatchObject({
+    status: "fail",
+    reason: "did not write padded.txt",
+  });
+});
+
+test("inherited-tool-name fails a lookup that finds Object.prototype", async () => {
+  const scenario = scenarios.find((item) => item.id === "inherited-tool-name");
+  if (!scenario) throw new Error("missing inherited-tool-name scenario");
+  const naive = await runScenario(referenceNaive, scenario);
+  expect(naive.status).toBe("fail");
+  const ran = (naive.probes ?? []).filter(
+    (probe) => probe.outcome.status === "executed",
+  );
+  expect(ran.map((probe) => JSON.parse(probe.raw).name)).toEqual([
+    "constructor",
+    "toString",
+    "hasOwnProperty",
+  ]);
+  const hardened = await runScenario(referenceHardened, scenario);
+  expect(hardened.status).toBe("pass");
+  for (const probe of hardened.probes ?? []) {
+    expect(probe.outcome).toEqual({
+      status: "refused",
+      reason: "unknown tool",
+    });
+  }
 });

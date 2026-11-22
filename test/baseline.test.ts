@@ -9,9 +9,11 @@ import { scenarios } from "../src/scenarios/index.ts";
 
 const NAIVE_STATUS = {
   "argument-type-confusion": "fail",
+  "content-whitespace-kept": "pass",
   "deep-nesting": "pass",
   "duplicate-keys": "fail",
   "duplicate-keys-after-repair": "pass",
+  "inherited-tool-name": "fail",
   "json-string-arguments": "fail",
   "oversized-argument": "fail",
   "path-escape": "fail",
@@ -45,7 +47,7 @@ test("update-baseline writes the reference-naive results", async () => {
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain(
-      "3 passed, 19 failed, 0 errors, 0 not covered",
+      "4 passed, 20 failed, 0 errors, 0 not covered",
     );
     expect(Object.keys(NAIVE_STATUS).sort()).toEqual(
       scenarios.map((scenario) => scenario.id).sort(),

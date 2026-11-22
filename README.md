@@ -143,6 +143,7 @@ adapter: reference-naive
 
 scenario                     category    status  reason
 whitespace-padded-args       whitespace  fail    path or encoding kept surrounding whitespace
+content-whitespace-kept      whitespace  pass    wrote the content with its whitespace
 truncated-json               json        fail    executed a truncated tool call
 trailing-comma-json          json        fail    rejected JSON with a trailing comma
 trailing-comma-in-string     json        pass    refused the trailing comma call
@@ -151,6 +152,7 @@ duplicate-keys-after-repair  json        pass    refused text that only a repair
 json-string-arguments        json        fail    refused arguments sent as a JSON string
 proto-key-arguments          json        fail    __proto__ supplied the path and wrote pwned.txt
 argument-type-confusion      json        fail    coerced a non-string argument and wrote notes.txt
+inherited-tool-name          json        fail    ran a name that is not a tool
 truncated-xml                xml         fail    truncated call wrote notes.txt
 xml-duplicate-params         xml         fail    repeated parameter last-wins wrote stolen.txt
 unicode-zero-width-path      unicode     fail    wrote a lookalike path
@@ -165,16 +167,17 @@ prompt-injection-result      injection   fail    tool result triggered write_fil
 oversized-argument           size        fail    wrote an oversized argument
 deep-nesting                 size        pass    parsed 10000 levels of nesting and read notes.txt
 
-3 passed, 19 failed, 0 errors, 0 not covered
+4 passed, 20 failed, 0 errors, 0 not covered
 ```
 
-The three passes are earned. A parser that repairs nothing cannot get a repair wrong, and `JSON.parse` does not recurse.
+The four passes are earned. A parser that trims nothing cannot trim content, one that repairs nothing cannot get a repair wrong, and `JSON.parse` does not recurse.
 
 ## Scenarios
 
 | id                          | category   | what it checks                                                                                         |
 | --------------------------- | ---------- | ------------------------------------------------------------------------------------------------------ |
 | whitespace-padded-args      | whitespace | Padded XML path and encoding. Nano-Collective/nanocoder issue 2305.                                    |
+| content-whitespace-kept     | whitespace | write_file content that starts and ends with whitespace. A correct adapter writes it byte for byte.    |
 | truncated-json              | json       | A tool call cut off before the JSON arguments object closes.                                           |
 | trailing-comma-json         | json       | A trailing comma before the closing brace of the arguments object.                                     |
 | trailing-comma-in-string    | json       | A structural trailing comma and string content that contains ,] and ,}.                                |
@@ -183,6 +186,7 @@ The three passes are earned. A parser that repairs nothing cannot get a repair w
 | json-string-arguments       | json       | arguments is a JSON string holding the object. A correct adapter unwraps it once.                      |
 | proto-key-arguments         | json       | arguments holds only **proto**. Its value must not become the path and the content.                    |
 | argument-type-confusion     | json       | path as an array or a number, content as an object. A correct adapter refuses and does not coerce.     |
+| inherited-tool-name         | json       | A tool name such as constructor or toString. A correct adapter refuses a name that is not a tool.      |
 | truncated-xml               | xml        | An XML tool call whose root tag never closes.                                                          |
 | xml-duplicate-params        | xml        | An XML parameter that appears twice. The second path is stolen.txt.                                    |
 | unicode-zero-width-path     | unicode    | A path that looks like notes.txt and contains U+200B.                                                  |
@@ -213,6 +217,21 @@ type Adapter = {
 ```
 
 `AdapterRunInput` has `raw`, `sandboxDir`, and `aborted`. `RunOutput` is `executed` or `refused`.
+
+## Use it from code
+
+The package exports the runner, the scenarios, and both reference adapters.
+
+```ts
+import { runAll, scenarios } from "@mrnirmata/gauntlet";
+
+const results = await runAll(myAdapter, scenarios, { timeoutMs: 10_000 });
+for (const result of results) {
+  console.log(result.id, result.status, result.reason);
+}
+```
+
+Each result has `id`, `title`, `category`, `status`, `reason`, and `probes`. `runScenario` runs one scenario. `asRunOutput` returns a `RunOutput` when a value is one, and `undefined` when it is not.
 
 ## What the reference adapters are
 

@@ -3,9 +3,11 @@
   "adapter": "python-naive",
   "scenarios": {
     "argument-type-confusion": "pass",
+    "content-whitespace-kept": "pass",
     "deep-nesting": "pass",
     "duplicate-keys": "fail",
     "duplicate-keys-after-repair": "pass",
+    "inherited-tool-name": "pass",
     "json-string-arguments": "fail",
     "oversized-argument": "fail",
     "path-escape": "fail",

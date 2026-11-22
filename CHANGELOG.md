@@ -2,11 +2,13 @@
 
 ## Unreleased
 
-New scenarios. The suite goes from 12 to 22. A baseline recorded before this lists them as new. They do not fail a `--baseline` run unless `--strict` is set.
+New scenarios. The suite goes from 12 to 24. A baseline recorded before this lists them as new. They do not fail a `--baseline` run unless `--strict` is set.
 
+- content-whitespace-kept
 - duplicate-keys-after-repair
 - proto-key-arguments
 - argument-type-confusion
+- inherited-tool-name
 - truncated-xml
 - xml-duplicate-params
 - unicode-bidi-path

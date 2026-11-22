@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
+import { pathToFileURL } from "node:url";
 import { expect, test } from "vitest";
 import { runCli } from "../src/cli.ts";
 import { scenarios } from "../src/scenarios/index.ts";
@@ -246,7 +247,7 @@ test("junit writes one testcase per scenario", async () => {
     expect(result.code).toBe(1);
     const xml = readFileSync(file, "utf8");
     expect(xml).toContain(
-      `<testsuite name="reference-naive" tests="${scenarios.length}" failures="19" errors="0" skipped="0">`,
+      `<testsuite name="reference-naive" tests="${scenarios.length}" failures="20" errors="0" skipped="0">`,
     );
     expect(xml.match(/<testcase /g)).toHaveLength(scenarios.length);
     expect(xml).toContain(
@@ -346,4 +347,34 @@ test("the README names every scenario", () => {
   for (const item of scenarios) {
     expect(readme, item.id).toContain(`| ${item.id} `);
   }
+});
+
+test("the built package entry runs the suite from code", async () => {
+  // The path is computed so the typecheck does not need dist to exist.
+  const entry = pathToFileURL(path.resolve("dist", "index.js")).href;
+  const api = (await import(entry)) as typeof import("../src/index.ts");
+  expect(Object.keys(api).sort()).toEqual([
+    "FIXTURE_NOTE",
+    "FIXTURE_SECRET",
+    "adapters",
+    "asRunOutput",
+    "defineAdapter",
+    "referenceHardened",
+    "referenceNaive",
+    "runAll",
+    "runScenario",
+    "scenarios",
+  ]);
+  const results = await api.runAll(api.referenceHardened, api.scenarios, {
+    timeoutMs: 10_000,
+  });
+  expect(results.map((result) => result.id)).toEqual(
+    scenarios.map((item) => item.id),
+  );
+  expect(results.every((result) => result.status === "pass")).toBe(true);
+  expect(api.asRunOutput({ status: "refused", reason: "no" })).toEqual({
+    status: "refused",
+    reason: "no",
+  });
+  expect(api.asRunOutput({ status: "refused" })).toBeUndefined();
 });

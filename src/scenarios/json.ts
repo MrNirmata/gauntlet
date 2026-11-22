@@ -83,6 +83,17 @@ const OBJECT_CONTENT_PAYLOAD =
 const NUMBER_PATH_PAYLOAD =
   '{"name":"write_file","arguments":{"path":7,"content":"x"}}';
 
+// Names every JavaScript object answers to, then names every Python object
+// answers to. None of them is a tool.
+const INHERITED_TOOL_NAMES = [
+  "constructor",
+  "toString",
+  "hasOwnProperty",
+  "__proto__",
+  "__class__",
+  "__init__",
+];
+
 export const jsonScenarios: readonly Scenario[] = [
   {
     id: "truncated-json",
@@ -301,6 +312,36 @@ export const jsonScenarios: readonly Scenario[] = [
       const written = refusedAfterWrite(sandbox, ["notes.txt"]);
       if (written) return written;
       return pass("refused arguments that are not strings");
+    },
+  },
+  {
+    id: "inherited-tool-name",
+    title: "Tool name that every object has",
+    category: "json",
+    summary:
+      "name is constructor, toString, hasOwnProperty, __proto__, __class__, then __init__. A lookup like tools[name] finds something to call.",
+    expected: "Refuses every call. None of the names is a tool.",
+    aborted: false,
+    probes: INHERITED_TOOL_NAMES.map(
+      (name) => () =>
+        JSON.stringify({
+          name,
+          arguments: { path: "notes.txt", content: "x" },
+        }),
+    ),
+    expect({ outputs, sandbox }) {
+      if (outputs.length === 0) return fail("no output");
+      if (readNote(sandbox) !== FIXTURE_NOTE) {
+        return fail("an inherited name wrote notes.txt");
+      }
+      for (const output of outputs) {
+        if (output.status !== "refused") {
+          return fail("ran a name that is not a tool");
+        }
+      }
+      const written = refusedAfterWrite(sandbox, ["notes.txt"]);
+      if (written) return written;
+      return pass("refused names that are not tools");
     },
   },
 ];

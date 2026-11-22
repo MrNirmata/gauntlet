@@ -1,6 +1,6 @@
 # Scoreboard
 
-Run on 2026-11-22 against the 22 scenarios on this branch. Numbers below are from that run. Nothing here is estimated.
+Run on 2026-11-22 against the 24 scenarios on this branch. Numbers below are from that run. Nothing here is estimated.
 
 ## nanocoder
 
@@ -17,6 +17,7 @@ The first run clones that commit into `third_party/nanocoder`. Git is required. 
 | scenario                    | status      | reason                                                           |
 | --------------------------- | ----------- | ---------------------------------------------------------------- |
 | whitespace-padded-args      | fail        | path or encoding kept surrounding whitespace                     |
+| content-whitespace-kept     | pass        | wrote the content with its whitespace                            |
 | truncated-json              | pass        | refused truncated JSON                                           |
 | trailing-comma-json         | fail        | rejected JSON with a trailing comma                              |
 | trailing-comma-in-string    | pass        | refused the trailing comma call                                  |
@@ -25,6 +26,7 @@ The first run clones that commit into `third_party/nanocoder`. Git is required. 
 | json-string-arguments       | fail        | refused arguments sent as a JSON string                          |
 | proto-key-arguments         | pass        | refused a call whose arguments were only **proto**               |
 | argument-type-confusion     | pass        | refused arguments that are not strings                           |
+| inherited-tool-name         | pass        | refused names that are not tools                                 |
 | truncated-xml               | pass        | refused truncated XML                                            |
 | xml-duplicate-params        | fail        | repeated parameter last-wins wrote stolen.txt                    |
 | unicode-zero-width-path     | fail        | wrote a lookalike path                                           |
@@ -39,7 +41,7 @@ The first run clones that commit into `third_party/nanocoder`. Git is required. 
 | oversized-argument          | not-covered | size check is in executeWriteFile, which this shim does not call |
 | deep-nesting                | pass        | parsed 10000 levels of nesting and read notes.txt                |
 
-13 passed, 7 failed, 0 errors, 2 not covered. Exit code 1. `not-covered` is not a pass or a fail.
+15 passed, 7 failed, 0 errors, 2 not covered. Exit code 1. `not-covered` is not a pass or a fail.
 
 `node dist/cli.js run --adapter nanocoder --verbose` prints each payload and what the shim returned for it.
 
@@ -75,10 +77,12 @@ Passes that are decisions of those two functions:
 - `truncated-xml`: `parseToolCalls` returns an error. The root tag is never closed.
 - `duplicate-keys-after-repair`: `parseToolCalls` returns no tool call. It does not repair the lone comma, so nothing runs.
 - `deep-nesting`: `parseToolCalls` returns the `read_file` with the nested argument, and the shim reads `notes.txt`.
+- `content-whitespace-kept`: `parseToolCalls` returns the content with its whitespace, and the shim writes it.
 
 Passes that are decisions of the shim, not of nanocoder:
 
 - `proto-key-arguments` and `argument-type-confusion`: the shim refuses when `path` or `content` is not a string. Those two lines are in `src/adapters/nanocoder-worker.ts`. What `read-file.tsx` and `write-file.tsx` do with such arguments is not measured.
+- `inherited-tool-name`: `parseToolCalls` returns a call named `constructor`, `toString`, and so on, although only `read_file` and `write_file` were offered. The shim refuses a name that is not one of those two. How nanocoder looks a tool up by name is not measured.
 
 `stream-aborted` and `oversized-argument` are `not-covered`. The abort check lives in `turn-engine.ts` before `executeTools`. The size check, if any, lives in `executeWriteFile` or the mutation firewall. Neither function is called.
 

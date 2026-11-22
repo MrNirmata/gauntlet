@@ -20,6 +20,9 @@ type Policy = {
   executeTruncatedJson: boolean;
   // Copy argument keys as own properties, and keep an argument's type.
   keepArgumentShape: boolean;
+  // Look a tool up by its own name only. Off means `TOOLS[name]`, which
+  // also finds constructor and toString.
+  ownToolNamesOnly: boolean;
   jailPaths: boolean;
   honorAbort: boolean;
   executeToolCallFoundInResult: boolean;
@@ -35,6 +38,7 @@ const naivePolicy: Policy = {
   unwrapStringArguments: false,
   executeTruncatedJson: true,
   keepArgumentShape: false,
+  ownToolNamesOnly: false,
   jailPaths: false,
   honorAbort: false,
   executeToolCallFoundInResult: true,
@@ -48,6 +52,7 @@ const hardenedPolicy: Policy = {
   unwrapStringArguments: true,
   executeTruncatedJson: false,
   keepArgumentShape: true,
+  ownToolNamesOnly: true,
   jailPaths: true,
   honorAbort: true,
   executeToolCallFoundInResult: false,
@@ -261,14 +266,33 @@ function matchObject(text: string, start: number): string | null {
   return null;
 }
 
+type Tool = (target: string, content: string) => string;
+
+const TOOLS: Record<string, Tool> = {
+  read_file(target) {
+    const stat = statSync(target, { throwIfNoEntry: false });
+    if (!stat?.isFile()) return "error: not found";
+    return readFileSync(target, "utf8");
+  },
+  write_file(target, content) {
+    writeFileSync(target, content, "utf8");
+    return "wrote";
+  },
+};
+
+function findTool(name: string, policy: Policy): Tool | undefined {
+  if (policy.ownToolNamesOnly && !Object.hasOwn(TOOLS, name)) return undefined;
+  const tool: unknown = TOOLS[name];
+  return typeof tool === "function" ? (tool as Tool) : undefined;
+}
+
 function executeCall(
   call: ToolCall,
   sandboxDir: string,
   policy: Policy,
 ): RunOutput {
-  if (call.name !== "read_file" && call.name !== "write_file") {
-    return { status: "refused", reason: "unknown tool" };
-  }
+  const tool = findTool(call.name, policy);
+  if (!tool) return { status: "refused", reason: "unknown tool" };
   const userPath = argumentText(call.arguments.path, policy);
   if (userPath === undefined) {
     return { status: "refused", reason: "missing argument" };
@@ -291,21 +315,14 @@ function executeCall(
     resolved = jailed.path;
   }
   // A tool that fails hands the failure back as its result, the way an agent
-  // loop reports a tool error to the model.
+  // loop reports a tool error to the model. The loop also turns whatever the
+  // tool returned into text.
   try {
-    if (call.name === "read_file") {
-      const stat = statSync(resolved, { throwIfNoEntry: false });
-      if (!stat?.isFile()) {
-        return { status: "executed", call, result: "error: not found" };
-      }
-      return {
-        status: "executed",
-        call,
-        result: readFileSync(resolved, "utf8"),
-      };
-    }
-    writeFileSync(resolved, content ?? "", "utf8");
-    return { status: "executed", call, result: "wrote" };
+    return {
+      status: "executed",
+      call,
+      result: String(tool(resolved, content ?? "")),
+    };
   } catch (error) {
     return { status: "executed", call, result: `error: ${errorCode(error)}` };
   }
