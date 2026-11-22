@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Add `gauntlet scan --mcp <command>`. It reads the tools an MCP server lists and the schema of each one, makes a plain call from the schema, puts payloads in every string argument, and sends calls the schema forbids. It works on a server with any tools, not only file tools.
+- A finding is something the scan saw: a planted secret in a reply, a planted file that changed, a marker file a payload created, a server that exited or stopped answering, a result for a call its schema rules out. Each has the call that caused it and one line on the fix.
+- The report says which tools turned down even a plain call. No finding means little for those.
+- The server is started in a temp directory with `PATH` and a temp `HOME` and nothing else of the user's. `--env` passes a variable on. A tool the server marks destructive is not called without `--destructive`.
+- `--tool`, `--skip`, `--ignore <kind[:tool]>`, `--fail-on`, `--max-calls`, and `--json` for the scan.
+- The README's action examples pin `v0.2.0`.
+
 ## 0.2.0
 
 The suite goes from 12 scenarios to 28. Gauntlet can now test code that is not a JavaScript adapter: a program in any language, an HTTP endpoint, and an MCP server with no adapter at all. `reference-hardened` passed all 12 scenarios of 0.1 and still had ways through, which the new scenarios found.

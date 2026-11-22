@@ -24,6 +24,7 @@ import { formatSarif } from "./sarif.ts";
 import { formatScan, formatScanJson, scanTotals } from "./scan/report.ts";
 import { type ScanReport, scanMcp } from "./scan/scan.ts";
 import { scenarios } from "./scenarios/index.ts";
+import { printable } from "./text.ts";
 import type { Adapter, Category, RunOptions, Scenario, Tier } from "./types.ts";
 
 const USAGE =
@@ -328,8 +329,10 @@ async function scanCommand(
     "--ignore",
     "--fail-on",
   ]);
+  // Some of these messages quote the server: a tool name, what it printed
+  // when it failed to start.
   const fail = (message: string): number => {
-    stderr.write(`${message}\n`);
+    stderr.write(`${printable(message)}\n`);
     return 2;
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -764,11 +767,14 @@ async function resolveRunAdapter(
     // A server that cannot do that gets one message, not the same error on
     // every row, and never a row of passes it did not earn.
     const check = await server.check();
+    // Both lines quote the server: its tool names, or what it replied.
     if (check.problem !== undefined) {
-      stderr.write(`${check.problem}\n`);
+      stderr.write(`${printable(check.problem)}\n`);
       return undefined;
     }
-    if (check.note !== undefined) stderr.write(`note: ${check.note}\n`);
+    if (check.note !== undefined) {
+      stderr.write(`note: ${printable(check.note)}\n`);
+    }
     return server;
   }
   const adapter = await resolveAdapter(flags.mode.spec, stderr);

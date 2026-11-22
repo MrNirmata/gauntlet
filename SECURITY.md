@@ -12,6 +12,19 @@ Gauntlet runs code you point it at.
 
 Point it at code you would run anyway.
 
+## What a scan does
+
+`gauntlet scan` is different from the rest. It does not send a fixed set of calls to two file tools. It calls every tool the server lists, with arguments it made up from the tool's schema.
+
+- A tool that deletes, sends, posts, or pays is asked to, unless the server marks it destructive. Most servers mark nothing.
+- The server is started in a temp directory with `PATH` and a temp `HOME` and no other variable of yours, so a tool that needs a token has none. A variable you pass with `--env` is one the server can use on anything.
+- Every path the scan sends is inside that temp directory or names a file the scan planted beside it. The commands it tries to inject only `touch` a file there. It does not send `/`, `~`, or a path of yours.
+- A server can still reach the network, and a tool that takes an absolute path can still be given one by its own defaults.
+
+Scan a server whose worst case you accept, with test credentials or none. `--tool` and `--skip` choose what is called.
+
+A scan with no findings does not mean the server is safe. The scan tries the payloads it has, on the arguments it can see, and a tool that turned down its plain call was not exercised at all. The report says which tools those are.
+
 ## What the sandbox is
 
 Each scenario gets a new directory under the system temp directory. It holds `workspace/` and `outside.txt`. Gauntlet deletes it when the scenario ends.

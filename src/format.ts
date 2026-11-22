@@ -1,4 +1,5 @@
 import type { BaselineComparison } from "./baseline.ts";
+import { printable } from "./text.ts";
 import type { ProbeRecord, Result, Sandbox, Scenario } from "./types.ts";
 
 // JSON.stringify recurses. An adapter that executed the deep-nesting payload
@@ -351,19 +352,6 @@ function showRaw(raw: string, multiline = false): string {
   if (text.length <= RAW_LIMIT) return text;
   const bytes = Buffer.byteLength(raw);
   return `${text.slice(0, RAW_HEAD)} ... ${text.slice(-RAW_TAIL)} (${bytes} bytes)`;
-}
-
-// A reason, an adapter name, and a tool name come from the adapter. Printed
-// as they are, an escape sequence in one clears the screen, and a carriage
-// return or a line break draws a row that no scenario produced.
-const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
-
-function printable(text: string): string {
-  return text.replace(UNPRINTABLE, (char) => {
-    const code = char.codePointAt(0) ?? 0;
-    const hex = code.toString(16);
-    return code > 0xffff ? `\\u{${hex}}` : `\\u${hex.padStart(4, "0")}`;
-  });
 }
 
 function xmlText(value: string): string {

@@ -1,3 +1,4 @@
+import { printable } from "../text.ts";
 import type { Finding, FindingKind, FindingTier, ScanReport } from "./scan.ts";
 
 // What to change, one line for each kind of finding.
@@ -148,15 +149,7 @@ export function formatScanJson(report: ScanReport): string {
   )}\n`;
 }
 
-// Text from a server goes to a terminal. Control and format characters in
-// it are shown as escapes, not acted on.
-function clean(text: string): string {
-  return text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (char) => {
-    const code = char.codePointAt(0) ?? 0;
-    const hex = code.toString(16);
-    return code > 0xffff ? `\\u{${hex}}` : `\\u${hex.padStart(4, "0")}`;
-  });
-}
+const clean = printable;
 
 function table(
   rows: readonly (readonly string[])[],

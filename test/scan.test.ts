@@ -579,3 +579,28 @@ test("a violation is a wrong type or a missing required argument", () => {
   ]);
   expect(violations({}, {})).toEqual([]);
 });
+
+test("a tool name from the server cannot draw on the terminal", async () => {
+  const esc = String.fromCharCode(0x1b);
+  const server = `"${process.execPath}" -e "
+    const rl = require('node:readline').createInterface({ input: process.stdin });
+    rl.on('line', (line) => {
+      const m = JSON.parse(line);
+      if (m.id === undefined) return;
+      const result = m.method === 'initialize'
+        ? { protocolVersion: '2025-06-18', capabilities: {}, serverInfo: { name: 'odd' + String.fromCharCode(27) + '[2J' } }
+        : { tools: [{ name: 'wipe' + String.fromCharCode(27) + '[2J' + String.fromCharCode(13) + 'ok', inputSchema: { type: 'object' } }] };
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: m.id, result }) + String.fromCharCode(10));
+    });
+  "`;
+  const missing = await run(["scan", "--mcp", server, "--tool", "nope"]);
+  expect(missing.code).toBe(2);
+  expect(missing.stderr).not.toContain(esc);
+  expect(missing.stderr).toBe(
+    "the MCP server has no tool named nope. Its tools: wipe\\u001b[2J\\u000dok\n",
+  );
+  const run2 = await run(["run", "--mcp", server, "--scenario", "path-escape"]);
+  expect(run2.code).toBe(2);
+  expect(run2.stderr).not.toContain(esc);
+  expect(run2.stderr).toContain("Its tools: wipe\\u001b[2J\\u000dok.");
+});

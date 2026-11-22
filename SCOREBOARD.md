@@ -118,6 +118,46 @@ What it did on the passes:
 
 The server also defends against one thing no scenario here can test. Its source pins the directory and opens with `O_NOFOLLOW`, against a symlink swapped between the check and the open. `reference-hardened` does not.
 
+### Scanned
+
+The same package under `gauntlet scan`, which calls every tool and not only the two that read and write. Run on 2026-11-23 on macOS with Node 25.9.
+
+```
+node dist/cli.js scan --mcp "node <path>/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js {workspace}" --destructive
+```
+
+```
+scan: server-filesystem@2.4.0
+server: secure-filesystem-server 2.4.0
+
+tool                       status   calls  plain call  findings
+read_file                  scanned  27     answered    0
+read_text_file             scanned  27     answered    0
+read_media_file            scanned  27     answered    0
+read_multiple_files        scanned  27     answered    0
+write_file                 scanned  53     answered    0
+append_file                scanned  53     answered    0
+edit_file                  scanned  77     answered    0
+create_directory           scanned  28     answered    0
+list_directory             scanned  28     answered    0
+list_directory_with_sizes  scanned  28     answered    0
+directory_tree             scanned  52     answered    0
+move_file                  scanned  53     answered    0
+copy_file                  scanned  53     answered    0
+search_files               scanned  78     answered    0
+get_file_info              scanned  27     answered    0
+list_allowed_directories   scanned  1      answered    0
+
+0 safety, 0 robustness, 0 notes.
+16 of 16 scanned tools answered a plain call.
+```
+
+Sixteen tools, each called with between 1 and 80 argument sets. No reply held the planted secret or the name of the planted file, nothing beside the directory changed, no injected command ran, and the server never exited or stopped answering. All 16 tools gave a result for a plain call, so the empty list is about a server that was doing its work.
+
+`--destructive` is there because the server marks `write_file`, `edit_file`, and `move_file` destructive, and a scan does not call such a tool without it.
+
+The scan does not send the Unicode names or the hard link of the fixed suite, so the five fails in the table above are not in it.
+
 ## Not scored
 
 These were looked at before `--structured` and `--mcp` existed. Cline and Continue take a call that is already parsed, and `--structured` can now give them one. Neither has been run that way yet.

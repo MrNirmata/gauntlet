@@ -4,15 +4,31 @@ Gauntlet feeds adversarial tool-call payloads to an adapter and prints pass, fai
 
 ## What it is for
 
-A model sends a tool call. Code you wrote reads it and runs it. Gauntlet sends that code the calls that go wrong in practice: a path that leaves the workspace, a symlink, a name with a hidden character, arguments of the wrong type, JSON cut off in the middle. It reports what your code did with each one.
+A model sends a tool call. Code you wrote reads it and runs it. Gauntlet sends that code the calls that go wrong in practice and reports what your code did with each one. It does this two ways.
 
-If you wrote an MCP server or an agent tool, one command tests it. No adapter is written.
+`gauntlet scan` works on any MCP server. It reads the tools the server lists and the schema of each one, and calls every tool with arguments it builds from that schema: paths that leave the directory, shell metacharacters, `file://` addresses, 10000 nested arrays. No adapter is written, and the server does not have to be a file server.
 
 ```
-gauntlet run --mcp "node {cwd}/dist/server.js {workspace}"
+gauntlet scan --mcp "node {cwd}/dist/server.js"
 ```
 
-If you are a team, the GitHub Action runs the same check on every pull request. `fail-on: safety` fails the build for a file written outside the workspace and not for a refused trailing comma. A baseline lets you turn it on before the code is clean.
+```
+2. safety  outside-read  read_note.path  CWE-22
+   The reply holds the contents of a file outside the server's directory, reached with a path that starts with ../.
+   call: {"name":"read_note","arguments":{"path":"../gauntlet-outside-1c9e77a0.txt"}}
+   fix:  Resolve the path against the allowed directory, follow symlinks, and refuse a result outside it.
+   4 more payloads on this argument did the same.
+
+3. safety  shell-injection  grep_notes.pattern  CWE-78
+   A command inside the argument ran: a ; and a command created the marker file it names.
+   call: {"name":"grep_notes","arguments":{"pattern":"gauntlet; touch /tmp/gauntlet-scan-x/gauntlet-marker-1"}}
+   fix:  Do not build a shell command from an argument. Pass the arguments to the program as a list, with no shell.
+   5 more payloads on this argument did the same.
+```
+
+`gauntlet run` is the fixed suite: 28 scenarios for code that reads and writes files, each with an exact expected result. It tests a JavaScript adapter, a program in any language, an HTTP endpoint, or an MCP file server, and it is what the scoreboard and a CI baseline are built on.
+
+If you are a team, the GitHub Action runs the suite on every pull request. `fail-on: safety` fails the build for a file written outside the workspace and not for a refused trailing comma. A baseline lets you turn it on before the code is clean.
 
 If you answer for many agents and servers, `--sarif` writes the results in the format code-scanning tools read. Each scenario is a rule with its CWE id, so a failure lands in the same place as every other finding.
 
@@ -22,7 +38,7 @@ Gauntlet requires Node 22.
 
 `npx @mrnirmata/gauntlet run --adapter reference-hardened` runs the package. Install it with `npm i -D @mrnirmata/gauntlet`.
 
-`--mcp`, `--structured`, `--tier`, `--fail-on`, `--sarif`, and the scenarios after the first 12 need 0.2.0 or later. `gauntlet --version` prints what you have. From a checkout, `node dist/cli.js` stands in for `gauntlet`.
+`gauntlet scan` needs 0.3.0, which is not published yet. `--mcp`, `--structured`, `--tier`, `--fail-on`, `--sarif`, and the scenarios after the first 12 need 0.2.0 or later. `gauntlet --version` prints what you have. From a checkout, `node dist/cli.js` stands in for `gauntlet`.
 
 ```
 pnpm install
@@ -88,6 +104,49 @@ node dist/cli.js run --adapter ./examples/adapter-template.mjs
 The module's default export, or a named export `adapter`, must be an object with a non-empty `name` and a `run` function. `defineAdapter` from `@mrnirmata/gauntlet` returns that object and checks the type.
 
 Node loads a `.ts` adapter when it can strip types: Node 22.6 with `--experimental-strip-types`, or a Node 22 that strips types by default. If Node cannot load the TypeScript file, compile it to `.js` or run Gauntlet through `tsx`.
+
+## Scan any MCP server
+
+`gauntlet scan --mcp "<command>"` starts the server, lists its tools, and calls each one.
+
+```
+gauntlet scan --mcp "node {cwd}/dist/server.js"
+gauntlet scan --mcp "python3 {cwd}/server.py" --env API_KEY --tool search,fetch
+```
+
+For each tool it first makes a plain call from the tool's schema: every required argument, with a value of its type. Then it puts payloads in every string argument, one at a time, and sends calls the schema forbids.
+
+A finding is never a guess. Each one is something the scan saw:
+
+| finding             | tier       | what the scan saw                                                                 |
+| ------------------- | ---------- | --------------------------------------------------------------------------------- |
+| outside-read        | safety     | A secret planted in a file beside the server's directory came back in a reply.    |
+| outside-list        | safety     | The name of a file planted there, which was never sent, came back in a reply.     |
+| outside-write       | safety     | A file beside the server's directory was changed, deleted, or created.            |
+| shell-injection     | safety     | A marker file was created by a command that was inside an argument.               |
+| url-file-read       | safety     | The planted secret came back for a `file://` address.                             |
+| phantom-tool        | safety     | The server gave a result for a tool name it does not list, such as `constructor`. |
+| crash               | robustness | The server process exited.                                                        |
+| hang                | robustness | The server did not answer within `--timeout`.                                     |
+| bad-reply           | robustness | A reply had no result and no error.                                               |
+| schema-not-enforced | robustness | A call the tool's own schema rules out got a result.                              |
+| loopback-fetch      | note       | The server fetched an address on this machine that an argument gave it.           |
+
+Each finding has the call that caused it, so you can send it again, and one line on the fix.
+
+The report also says what it could not judge. `plain call: refused` means the tool turned down even a call with nothing odd in it, usually for a missing key or a file it wanted. No finding means little for that tool, because a server that turns everything down gives nothing to find. `--env NAME` gives the server a variable it needs.
+
+What the scan does to keep a wrong guess from costing you:
+
+- The server runs in a new temp directory, with `PATH` and a temp `HOME` in its environment and nothing else of yours. A tool that needs a token does not have one unless you pass it with `--env`.
+- Every path it sends is inside that temp directory or names a file it planted beside it. The commands it tries to inject only `touch` a file there.
+- A tool the server marks destructive is not called. `--destructive` calls it.
+
+That is not a sandbox. A tool that deletes, sends, or pays, and that the server does not mark destructive, is asked to with made-up arguments. Scan a server whose worst case you accept, with the credentials you would give a test. `--tool` and `--skip` choose which tools are called. SECURITY.md has the rest.
+
+`--ignore <kind>` or `--ignore <kind>:<tool>` leaves a finding out, for a server that reads any file on purpose. `--fail-on safety` lets only safety findings fail the run, and `--json` prints the report as one object.
+
+`scan` is new in 0.3.0 and may change.
 
 ## Safety and robustness
 
@@ -192,7 +251,7 @@ The action in this repo builds Gauntlet from its own checkout, then runs it in y
 
 The job summary gets a Markdown table of the results. When the run used a baseline, the summary adds regressions, improvements, and new scenarios. Outputs are `pass`, `fail`, `error`, `not-covered`, and `regressions`.
 
-`uses: MrNirmata/gauntlet@main` tracks the main branch. Pin a tag once one exists, for example `MrNirmata/gauntlet@v0.2.0`.
+`uses: MrNirmata/gauntlet@v0.2.0` pins a release. `@main` tracks the main branch.
 
 ```yaml
 name: gauntlet
@@ -205,7 +264,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: MrNirmata/gauntlet@main
+      - uses: MrNirmata/gauntlet@v0.2.0
         with:
           exec: python3 adapter.py
           baseline: gauntlet-baseline.json
@@ -224,7 +283,7 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4
-      - uses: MrNirmata/gauntlet@main
+      - uses: MrNirmata/gauntlet@v0.2.0
         with:
           mcp: node {cwd}/dist/server.js {workspace}
           fail-on: safety
