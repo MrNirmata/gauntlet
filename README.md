@@ -22,7 +22,7 @@ Gauntlet requires Node 22.
 
 `npx @mrnirmata/gauntlet run --adapter reference-hardened` runs the package. Install it with `npm i -D @mrnirmata/gauntlet`.
 
-The package on npm is 0.1.1. `--mcp`, `--structured`, `--tier`, `--fail-on`, `--sarif`, and the scenarios after the first 12 are in 0.2.0, which is not published yet. Until it is, run from a checkout: `node dist/cli.js` in place of `gauntlet`.
+`--mcp`, `--structured`, `--tier`, `--fail-on`, `--sarif`, and the scenarios after the first 12 need 0.2.0 or later. `gauntlet --version` prints what you have. From a checkout, `node dist/cli.js` stands in for `gauntlet`.
 
 ```
 pnpm install
@@ -192,7 +192,7 @@ The action in this repo builds Gauntlet from its own checkout, then runs it in y
 
 The job summary gets a Markdown table of the results. When the run used a baseline, the summary adds regressions, improvements, and new scenarios. Outputs are `pass`, `fail`, `error`, `not-covered`, and `regressions`.
 
-`uses: MrNirmata/gauntlet@main` tracks this branch until v0.2.0 is released. Pin a tag after that, for example `MrNirmata/gauntlet@v0.2.0`.
+`uses: MrNirmata/gauntlet@main` tracks the main branch. Pin a tag once one exists, for example `MrNirmata/gauntlet@v0.2.0`.
 
 ```yaml
 name: gauntlet

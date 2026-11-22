@@ -12,7 +12,7 @@ import { expect, test } from "vitest";
 import { referenceNaive } from "../src/adapters/reference.ts";
 import { runCli } from "../src/cli.ts";
 import { scenarios } from "../src/scenarios/index.ts";
-import type { AdapterRunInput } from "../src/types.ts";
+import type { AdapterRunInput, RunOutput } from "../src/types.ts";
 
 const python3 = spawnSync("python3", ["--version"], { encoding: "utf8" });
 
@@ -276,6 +276,24 @@ test.skipIf(python3.status !== 0)(
   },
 );
 
+// An executed output carries the call back, and for deep-nesting that call
+// is 10000 arrays deep. JSON.stringify recurses, and on Node 22 and 24 that
+// is deeper than its stack. This server is not what the scenario tests, so
+// it leaves the arguments out when they cannot be printed.
+function replyText(output: RunOutput): string {
+  try {
+    return JSON.stringify(output);
+  } catch (error) {
+    if (!(error instanceof RangeError) || output.status !== "executed") {
+      throw error;
+    }
+    return JSON.stringify({
+      ...output,
+      call: { name: output.call.name, arguments: {} },
+    });
+  }
+}
+
 async function serveNaive(
   req: IncomingMessage,
   res: ServerResponse,
@@ -283,8 +301,10 @@ async function serveNaive(
   try {
     const input = readProbe(await readBody(req));
     const output = await referenceNaive.run(input);
+    // Printed before the headers go out, so a failure here is still a 500.
+    const body = replyText(output);
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify(output));
+    res.end(body);
   } catch (error) {
     res.writeHead(500, { "content-type": "text/plain" });
     res.end(error instanceof Error ? error.message : String(error));

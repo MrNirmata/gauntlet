@@ -84,7 +84,7 @@ const output = runJob(
   parserModule.parseToolCalls,
   pathModule.resolveFilePath,
 );
-process.stdout.write(`${JSON.stringify(output)}\n`);
+process.stdout.write(`${replyText(output)}\n`);
 
 function runJob(
   input: Job,
@@ -193,4 +193,22 @@ function errorCode(error: unknown): string {
     return error.code;
   }
   return "failed";
+}
+
+// An executed output carries the call back. JSON.stringify recurses, and the
+// arguments of deep-nesting are deeper than its stack on Node 22 and 24. The
+// scenario asks what nanocoder does with the call, not whether this shim
+// can print it, so the arguments are left out when they cannot be printed.
+function replyText(reply: RunOutput): string {
+  try {
+    return JSON.stringify(reply);
+  } catch (error) {
+    if (!(error instanceof RangeError) || reply.status !== "executed") {
+      throw error;
+    }
+    return JSON.stringify({
+      ...reply,
+      call: { name: reply.call.name, arguments: {} },
+    });
+  }
 }

@@ -3,6 +3,7 @@
 // has the keys the scenario wrote, __proto__ included.
 import { readFileSync } from "node:fs";
 import { referenceHardened } from "../../dist/index.js";
+import { replyText } from "./reply.mjs";
 
 const request = JSON.parse(readFileSync(0, "utf8"));
 let output;
@@ -34,7 +35,4 @@ if (request.call === undefined) {
           aborted: request.aborted,
         });
 }
-// Deep nesting comes back in the call. Leave that one argument out of the
-// reply, so printing the reply does not need the stack the scenario is about.
-if (output.status === "executed") delete output.call.arguments.filter;
-process.stdout.write(`${JSON.stringify(output)}\n`);
+process.stdout.write(`${replyText(output)}\n`);

@@ -1,6 +1,6 @@
 {
   "name": "@mrnirmata/gauntlet",
-  "version": "0.2.0-dev",
+  "version": "0.2.0",
   "description": "Adversarial checks for the code that turns model output into a tool call.",
   "keywords": [
     "tool-call",
