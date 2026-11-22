@@ -21,11 +21,13 @@ import {
 } from "./format.ts";
 import { runAll } from "./run.ts";
 import { formatSarif } from "./sarif.ts";
+import { formatScan, formatScanJson, scanTotals } from "./scan/report.ts";
+import { type ScanReport, scanMcp } from "./scan/scan.ts";
 import { scenarios } from "./scenarios/index.ts";
 import type { Adapter, Category, RunOptions, Scenario, Tier } from "./types.ts";
 
 const USAGE =
-  "usage: gauntlet list [--json] | gauntlet show <id> | gauntlet run (--adapter <name-or-path> | --exec <command> | --http <url> | --mcp <command>) [options]. gauntlet help lists the options.\n";
+  "usage: gauntlet list [--json] | gauntlet show <id> | gauntlet run (--adapter <name-or-path> | --exec <command> | --http <url> | --mcp <command>) [options] | gauntlet scan --mcp <command> [options]. gauntlet help lists the options.\n";
 
 const HELP = `Gauntlet feeds adversarial tool-call payloads to an adapter.
 
@@ -33,6 +35,8 @@ commands:
   gauntlet list [--json]     print every scenario
   gauntlet show <id>         print one scenario and the payloads it sends
   gauntlet run <target>      run the scenarios against an adapter
+  gauntlet scan --mcp <cmd>  call every tool of an MCP server with arguments made
+                             from its own schemas, and report what it did
   gauntlet help              print this text
   gauntlet --version         print the version
 
@@ -70,6 +74,17 @@ what fails the run:
   --strict                   with --baseline, count a new failing scenario as a regression
   --timeout <ms>             limit for one probe. The default is 10000
 
+scan options:
+  --tool <name>              scan only this tool. Repeat it, or separate names with commas
+  --skip <name>              leave this tool out
+  --destructive              also call tools the server marks destructive
+  --env <NAME[=value]>       give the server this variable. It gets PATH and a temp HOME,
+                             and nothing else of yours, unless you name it
+  --ignore <kind[:tool]>     leave findings of this kind out of the report and the exit code
+  --fail-on <tier>           any, safety, robustness, or none
+  --max-calls <n>            calls per tool. The default is 300
+  --json, --name, --timeout  as for run
+
 exit codes:
   0  no scenario that decides the run failed, errored, or regressed
   1  a scenario that decides the run failed, errored, or regressed
@@ -77,6 +92,7 @@ exit codes:
 `;
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_SCAN_CALLS = 300;
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
 type RunMode =
@@ -128,6 +144,13 @@ export async function runCli(
     return command === "list"
       ? listCommand(argv.slice(1), stdout, stderr)
       : showCommand(argv.slice(1), stdout, stderr);
+  }
+  if (command === "scan") {
+    if (argv.includes("--help") || argv.includes("-h")) {
+      stdout.write(HELP);
+      return 0;
+    }
+    return scanCommand(argv.slice(1), stdout, stderr);
   }
   if (command !== "run") {
     stderr.write(USAGE);
@@ -262,6 +285,161 @@ function adapterFile(mode: RunMode): string | undefined {
   return mode.kind === "adapter" && isAdapterPath(mode.spec)
     ? mode.spec
     : undefined;
+}
+
+const SCAN_KINDS: readonly string[] = [
+  "outside-read",
+  "outside-list",
+  "outside-write",
+  "url-file-read",
+  "shell-injection",
+  "phantom-tool",
+  "crash",
+  "hang",
+  "bad-reply",
+  "schema-not-enforced",
+  "loopback-fetch",
+];
+
+async function scanCommand(
+  argv: readonly string[],
+  stdout: NodeJS.WritableStream,
+  stderr: NodeJS.WritableStream,
+): Promise<number> {
+  let mcp: string | undefined;
+  let name: string | undefined;
+  let timeoutMs = DEFAULT_TIMEOUT_MS;
+  let maxCalls = DEFAULT_SCAN_CALLS;
+  let json = false;
+  let destructive = false;
+  let failOn: "any" | "safety" | "robustness" | "none" = "any";
+  const only: string[] = [];
+  const skip: string[] = [];
+  const ignore: { kind: string; tool: string | undefined }[] = [];
+  const env: Record<string, string> = {};
+  const valued = new Set([
+    "--mcp",
+    "--name",
+    "--timeout",
+    "--max-calls",
+    "--tool",
+    "--skip",
+    "--env",
+    "--ignore",
+    "--fail-on",
+  ]);
+  const fail = (message: string): number => {
+    stderr.write(`${message}\n`);
+    return 2;
+  };
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === undefined) continue;
+    if (token === "--json") {
+      json = true;
+      continue;
+    }
+    if (token === "--destructive") {
+      destructive = true;
+      continue;
+    }
+    if (!valued.has(token)) return fail(`unknown argument ${token}`);
+    const value = argv[index + 1];
+    if (value === undefined || value.length === 0 || value.startsWith("--")) {
+      return fail(`missing ${token} value`);
+    }
+    index += 1;
+    if (token === "--mcp") mcp = value;
+    else if (token === "--name") name = value;
+    else if (token === "--tool") only.push(...splitList(value));
+    else if (token === "--skip") skip.push(...splitList(value));
+    else if (token === "--timeout" || token === "--max-calls") {
+      if (!/^[1-9]\d*$/.test(value) || Number(value) > MAX_TIMEOUT_MS) {
+        return fail(`invalid ${token}`);
+      }
+      if (token === "--timeout") timeoutMs = Number(value);
+      else maxCalls = Number(value);
+    } else if (token === "--fail-on") {
+      if (
+        value !== "any" &&
+        value !== "safety" &&
+        value !== "robustness" &&
+        value !== "none"
+      ) {
+        return fail(
+          `invalid --fail-on ${value}; one of any, safety, robustness, none`,
+        );
+      }
+      failOn = value;
+    } else if (token === "--ignore") {
+      // outside-read, or outside-read:read_file for one tool only.
+      const [kind = "", tool] = value.split(":");
+      if (!SCAN_KINDS.includes(kind)) {
+        return fail(`unknown finding ${kind}; one of ${SCAN_KINDS.join(", ")}`);
+      }
+      ignore.push({ kind, tool });
+    } else {
+      // NAME passes the variable on. NAME=value sets it.
+      const equals = value.indexOf("=");
+      const key = equals < 0 ? value : value.slice(0, equals);
+      const given = equals < 0 ? process.env[key] : value.slice(equals + 1);
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+        return fail(`invalid --env ${value}`);
+      }
+      if (given === undefined) return fail(`--env ${key} is not set here`);
+      env[key] = given;
+    }
+  }
+  if (mcp === undefined) return fail("missing --mcp");
+  let report: ScanReport;
+  try {
+    report = await scanMcp({
+      command: mcp,
+      name: name ?? `mcp:${mcp}`,
+      timeoutMs,
+      only,
+      skip,
+      destructive,
+      env,
+      maxCallsPerTool: maxCalls,
+    });
+  } catch (error) {
+    return fail(`could not scan the MCP server: ${errorLine(error)}`);
+  }
+  const unknown = [...only, ...skip].filter(
+    (tool) => !report.tools.some((row) => row.name === tool),
+  );
+  if (unknown.length > 0) {
+    return fail(
+      `the MCP server has no tool named ${unknown.join(", ")}. Its tools: ${report.tools.map((row) => row.name).join(", ")}`,
+    );
+  }
+  const kept = {
+    ...report,
+    findings: report.findings.filter(
+      (finding) =>
+        !ignore.some(
+          (rule) =>
+            rule.kind === finding.kind &&
+            (rule.tool === undefined || rule.tool === finding.tool),
+        ),
+    ),
+  };
+  stdout.write(json ? formatScanJson(kept) : formatScan(kept));
+  const ignored = report.findings.length - kept.findings.length;
+  if (ignored > 0) {
+    stderr.write(
+      `note: ${ignored} ${ignored === 1 ? "finding" : "findings"} left out by --ignore\n`,
+    );
+  }
+  const totals = scanTotals(kept.findings);
+  const bad =
+    failOn === "none"
+      ? 0
+      : failOn === "any"
+        ? totals.safety + totals.robustness
+        : totals[failOn];
+  return bad > 0 ? 1 : 0;
 }
 
 function listCommand(

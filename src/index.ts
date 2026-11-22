@@ -7,6 +7,16 @@ export { asRunOutput } from "./output.ts";
 export { runAll, runScenario } from "./run.ts";
 export { FIXTURE_NOTE, FIXTURE_SECRET } from "./sandbox.ts";
 export { formatSarif } from "./sarif.ts";
+export { formatScan, formatScanJson, scanTotals } from "./scan/report.ts";
+export type {
+  Finding,
+  FindingKind,
+  FindingTier,
+  ScanOptions,
+  ScanReport,
+  ToolRow,
+} from "./scan/scan.ts";
+export { scanMcp } from "./scan/scan.ts";
 export { scenarios } from "./scenarios/index.ts";
 export { splitCall } from "./structured.ts";
 export type {

@@ -37,12 +37,57 @@ type Pending = {
   timer: NodeJS.Timeout;
 };
 
-type Session = {
+// A tool as the server lists it. inputSchema is whatever the server sent.
+export type McpTool = {
+  readonly name: string;
+  readonly description?: string;
+  readonly inputSchema?: unknown;
+  readonly annotations?: Readonly<Record<string, unknown>>;
+};
+
+export type McpReply = Reply;
+
+export type McpSession = {
   readonly workspace: string;
   readonly tools: ReadonlySet<string>;
+  readonly toolList: readonly McpTool[];
+  // The server's own name and version, from its answer to initialize.
+  readonly serverInfo: string;
   request(method: string, paramsJson?: string): Promise<Reply>;
   stop(): Promise<void>;
 };
+
+type Session = McpSession;
+
+export type McpStartOptions = {
+  // The whole environment of the server. Omit it to pass on Gauntlet's own.
+  readonly env?: Readonly<Record<string, string>>;
+};
+
+// Starts the server in dir and returns once it has listed its tools.
+export function openMcpSession(
+  command: string,
+  dir: string,
+  timeoutMs: number,
+  options: McpStartOptions = {},
+): Promise<McpSession> {
+  return startSession(command, dir, timeoutMs, options);
+}
+
+// The text of a tools/call result, and whether the server marked it an error.
+export function readMcpResult(reply: McpReply): {
+  text: string;
+  failed: boolean;
+} {
+  if (reply.error !== undefined) {
+    return { text: reply.error.message, failed: true };
+  }
+  const result = reply.result;
+  return {
+    text: resultText(result),
+    failed: isRecord(result) && result.isError === true,
+  };
+}
 
 export type McpCheck = {
   // Every tool the server lists.
@@ -333,6 +378,7 @@ async function startSession(
   command: string,
   sandboxDir: string,
   timeoutMs: number,
+  options: McpStartOptions = {},
 ): Promise<Session> {
   // The server gets the path the system itself uses. On macOS a temp
   // directory is reached through a symlink, and a server that compares real
@@ -348,6 +394,7 @@ async function startSession(
     cwd: real,
     detached: true,
     stdio: "pipe",
+    ...(options.env === undefined ? {} : { env: { ...options.env } }),
   });
   const { stdin, stdout, stderr: errors } = child;
   if (stdin === null || stdout === null || errors === null) {
@@ -535,18 +582,32 @@ async function startSession(
       throw new Error("mcp initialize reply had no result");
     }
     send('{"jsonrpc":"2.0","method":"notifications/initialized"}');
-    const tools = await listTools(request);
-    return { workspace: sandboxDir, tools, request, stop };
+    const toolList = await listTools(request);
+    return {
+      workspace: sandboxDir,
+      tools: new Set(toolList.map((tool) => tool.name)),
+      toolList,
+      serverInfo: describeServer(hello.result),
+      request,
+      stop,
+    };
   } catch (error) {
     await stop();
     throw error;
   }
 }
 
-async function listTools(
-  request: Session["request"],
-): Promise<ReadonlySet<string>> {
-  const names = new Set<string>();
+function describeServer(hello: Record<string, unknown>): string {
+  const info = hello.serverInfo;
+  if (!isRecord(info) || typeof info.name !== "string") return "unnamed server";
+  return typeof info.version === "string"
+    ? `${info.name} ${info.version}`
+    : info.name;
+}
+
+async function listTools(request: Session["request"]): Promise<McpTool[]> {
+  const tools: McpTool[] = [];
+  const seen = new Set<string>();
   let cursor: string | undefined;
   for (let page = 0; page < MAX_TOOL_PAGES; page += 1) {
     const reply = await request(
@@ -559,11 +620,25 @@ async function listTools(
       );
     }
     const result = reply.result;
-    if (!isRecord(result) || !Array.isArray(result.tools)) return names;
+    if (!isRecord(result) || !Array.isArray(result.tools)) return tools;
     for (const tool of result.tools) {
-      if (isRecord(tool) && typeof tool.name === "string") names.add(tool.name);
+      if (!isRecord(tool) || typeof tool.name !== "string") continue;
+      if (seen.has(tool.name)) continue;
+      seen.add(tool.name);
+      tools.push({
+        name: tool.name,
+        ...(typeof tool.description === "string"
+          ? { description: tool.description }
+          : {}),
+        ...(tool.inputSchema === undefined
+          ? {}
+          : { inputSchema: tool.inputSchema }),
+        ...(isRecord(tool.annotations)
+          ? { annotations: tool.annotations }
+          : {}),
+      });
     }
-    if (typeof result.nextCursor !== "string") return names;
+    if (typeof result.nextCursor !== "string") return tools;
     cursor = result.nextCursor;
   }
   // A list that never ends is not a list of the server's tools.
