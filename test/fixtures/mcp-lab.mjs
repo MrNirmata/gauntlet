@@ -438,6 +438,24 @@ const sets = {
     },
     // Looks, and then does not only look.
     list_and_purge: bare(),
+    // The confirmation is there, one $ref away.
+    get_report: {
+      inputSchema: {
+        $ref: "#/definitions/Args",
+        definitions: {
+          Args: {
+            type: "object",
+            properties: { confirm: { const: true }, name: string },
+            required: ["confirm", "name"],
+          },
+        },
+      },
+      run: done,
+    },
+    // Marks that are not true or false.
+    get_b: bare({ destructiveHint: "true" }),
+    get_d: bare({ readOnlyHint: "false" }),
+    wipe_g: bare({ readOnlyHint: true, destructiveHint: 1 }),
   },
   softtool: {
     add: {

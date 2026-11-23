@@ -42,7 +42,7 @@ export type Violation = {
   readonly arguments: Record<string, unknown>;
 };
 
-const MAX_DEPTH = 4;
+const MAX_DEPTH = 6;
 export const MAX_POINTS = 16;
 // How many values one call is built from. A schema that asks for more is
 // filled in as far as this and no further.
@@ -64,7 +64,8 @@ const NEW_TEXT_NAME = /(^|[^a-z])(new|replacement|replace|with)($|[^a-z])/i;
 const URL_NAME =
   /(^|[^a-z])(url|urls|uri|uris|link|href|endpoint|website|webpage)($|[^a-z])/i;
 const COMMAND_NAME = /(^|[^a-z])(command|commands|cmd|shell|script)($|[^a-z])/i;
-const ID_NAME = /(^|[^a-z])(id|ids|pid|uid|gid|port|number)($|[^a-z])/i;
+const ID_NAME =
+  /(^|[^a-z])(id|ids|pid|uid|gid|port|number|num|no|seq|row|line|issue|key|ticket|record|item|entry)($|[^a-z])/i;
 // Where to begin. Nothing is the natural place.
 const START_NAME = /(^|[^a-z])(offset|index|start|skip|from|page)($|[^a-z])/i;
 // How much to return or keep. A plain call asks for plenty: one line of a
@@ -80,6 +81,9 @@ const NEGATED =
 // A switch that makes a call do more. It is left off whatever its default.
 const RISKY_SWITCH =
   /(^|[^a-z])(force|forced|overwrite|replace|recursive|delete|remove|purge|prune|clean|clear|wipe|reset|all|confirm|confirmed|yes|hard|permanent)($|[^a-z])/i;
+// An argument that asks whether the caller means it.
+const CONFIRMS =
+  /(^|[^a-z])(confirm|confirmed|confirmation|force|forced|yes|sure|acknowledge)($|[^a-z])/i;
 // A switch that holds on to what is there. It is turned on.
 const KEEP_SWITCH =
   /(^|[^a-z])(keep|preserve|backup|existing|append)($|[^a-z])/i;
@@ -90,31 +94,63 @@ const RISKY_OPTION =
   /(^|[^a-z])(replace|overwrite|write|hard|force|production|prod|yes|true|on|w|rw|all)($|[^a-z])/i;
 
 // What a name says a tool or an option does. The name is all there is to go
-// on: most servers mark nothing.
-const CHANGES =
-  /(^|[^a-z])(delete|del|remove|rm|rmdir|unlink|drop|destroy|purge|prune|wipe|erase|expunge|nuke|shred|clear|clean|cleanup|empty|truncate|trim|flush|expire|evict|trash|discard|forget|unset|pop|dequeue|kill|terminate|stop|halt|shutdown|reboot|restart|send|post|publish|deploy|release|pay|charge|refund|transfer|withdraw|purchase|buy|order|book|email|mail|sms|tweet|notify|invite|merge|push|commit|stash|restore|reset|revert|rollback|rotate|archive|format|uninstall|revoke|ban|block|cancel|close|logout|overwrite|replace|reinit|migrate|migration|apply)($|[^a-z])/i;
-// The same verbs run together with what they act on: deletefile, dropdb.
-const CHANGES_PREFIX =
-  /^(delete|remove|rmdir|unlink|drop|destroy|purge|wipe|erase|truncate|kill|uninstall)/i;
-// Verbs that are never the name of a thing. list_orders lists. list_and_purge
-// does not only list.
-const REMOVES =
-  /(^|[^a-z])(delete|del|remove|rm|rmdir|unlink|drop|destroy|purge|prune|wipe|erase|expunge|nuke|shred|clear|truncate|trim|flush|kill|uninstall|overwrite|replace)($|[^a-z])/i;
-const JOINED = /[^a-z](and|then|or)[^a-z]/i;
-// A name that starts by saying it only looks: get_post, list_orders.
-const LOOKS =
-  /^(get|list|read|search|find|grep|fetch|show|view|describe|count|query|lookup|check|is|has|stat|info|status|peek|inspect|ls|cat|head|tail|diff|compare|validate|verify|explain|preview)($|[^a-z])/i;
+// on: most servers mark nothing. A name is read word by word.
+const wordSet = (list: string): ReadonlySet<string> => new Set(list.split(" "));
+// Removing, sending, spending, or putting back.
+const CHANGES = wordSet(
+  "delete del remove rm rmrf rmdir unlink drop destroy purge prune wipe erase expunge nuke shred clear clean cleanup empty truncate trim flush expire evict trash discard forget unset pop dequeue kill killall terminate stop halt shutdown reboot restart send post publish deploy release pay charge refund transfer withdraw purchase buy order book email mail sms tweet notify invite merge push commit stash restore reset revert rollback rotate archive format uninstall revoke ban block cancel close logout overwrite replace reinit migrate migration apply",
+);
+// The ones that are never the name of a thing. list_orders lists orders.
+// list_purge does not only list.
+const REMOVES = wordSet(
+  "delete del remove rm rmrf rmdir unlink drop destroy purge prune wipe erase expunge nuke shred clear truncate trim flush kill killall uninstall overwrite replace",
+);
+// The same, run together with what they act on: deletefile, dropdb, wipedisk.
+const RUN_TOGETHER =
+  /^(delete|remove|rmdir|unlink|drop|destroy|purge|wipe|erase|truncate|kill|uninstall)/;
+// Changing something without removing it.
+const WRITES = wordSet(
+  "add append create set update insert write put save store install execute exec run increment decrement upload import edit modify change rename move copy sync start enable disable toggle mark assign grant lock unlock register login connect make build",
+);
+const JOINS = wordSet("and then or");
+// A name that starts by saying it only looks: get_user, list_files.
+const LOOKS = wordSet(
+  "get list read search find grep fetch show view describe count query lookup check is has stat info status peek inspect ls cat head tail diff compare validate verify explain preview",
+);
+
+// The words of a name, lower case. A word with a letter outside a to z is
+// kept whole, and is not one this reads.
+function tokens(name: string): string[] {
+  return words(name)
+    .split(/[^\p{L}]+/u)
+    .filter((word) => word.length > 0)
+    .map((word) => word.toLowerCase());
+}
 
 // What a tool's name says it does: only looks, removes or sends or spends,
-// or nothing either way.
+// or nothing either way. "Only looks" is the one answer that lets a scan
+// call a tool unasked, so it is the hardest to get: the first word says it
+// looks, and no later word says, or could say, that it does more.
 export function nature(name: string): "reads" | "removes" | "unknown" {
-  const spaced = words(name);
-  const removes = CHANGES.test(spaced) || CHANGES_PREFIX.test(spaced);
-  if (LOOKS.test(spaced)) {
-    // A second verb, or one that is never a noun, says it does more.
-    return JOINED.test(spaced) || REMOVES.test(spaced) ? "removes" : "reads";
+  const [first = "", ...rest] = tokens(name);
+  const all = [first, ...rest];
+  const removes = (word: string): boolean =>
+    REMOVES.has(word) || RUN_TOGETHER.test(word);
+  if (!LOOKS.has(first)) {
+    return all.some((word) => CHANGES.has(word) || RUN_TOGETHER.test(word))
+      ? "removes"
+      : "unknown";
   }
-  return removes ? "removes" : "unknown";
+  if (rest.some((word) => JOINS.has(word) || removes(word))) return "removes";
+  // check_in and check_out are not checks.
+  if (first === "check" && (rest[0] === "in" || rest[0] === "out")) {
+    return "unknown";
+  }
+  return rest.some(
+    (word) => CHANGES.has(word) || WRITES.has(word) || !/^[a-z]+$/.test(word),
+  )
+    ? "unknown"
+    : "reads";
 }
 
 // Whether a name says the thing removes, sends, or spends.
@@ -155,7 +191,7 @@ function leastOf(options: readonly unknown[], name: string): unknown {
   const risky = (option: string): boolean => RISKY_OPTION.test(words(option));
   const safe = (option: string): boolean => {
     const spaced = words(option);
-    return LOOKS.test(spaced) || SAFE_OPTION.test(spaced);
+    return LOOKS.has(tokens(option)[0] ?? "") || SAFE_OPTION.test(spaced);
   };
   return (
     named.find((option) => safe(option) && !risky(option)) ??
@@ -227,9 +263,12 @@ function typeOf(schema: SchemaNode): string | undefined {
 export type SchemaReader = {
   // Whether the tool published a schema with any argument in it.
   readonly described: boolean;
-  // Whether the last call built was cut short because the schema asks for
-  // more values than a scan fills in.
+  // Whether the last call built is missing something the schema requires,
+  // because the schema is deeper or wider than a scan fills in.
   truncated(): boolean;
+  // Whether the tool requires an argument that asks if the caller means it:
+  // confirm, force, yes.
+  confirms(): boolean;
   // The arguments of a plain call: every required property, nothing else.
   plain(values: BaseValues): Record<string, unknown>;
   // Optional properties that hold a string, each with the value it would
@@ -305,9 +344,13 @@ export function readSchema(document: unknown): SchemaReader {
   // What one call has been given so far. No two arguments get the same
   // string where another one can be made.
   let spent = 0;
+  // Whether the call being built is missing something its schema requires,
+  // because the schema is deeper or wider than a scan fills in.
+  let cut = false;
   let taken = new Set<string>();
   const begin = (): void => {
     spent = 0;
+    cut = false;
     taken = new Set();
   };
   const unique = (text: string, next: (round: number) => string): string => {
@@ -361,11 +404,33 @@ export function readSchema(document: unknown): SchemaReader {
       return Math.min(Math.max(wanted, low), high);
     }
     if (type === "array") {
-      if (depth >= MAX_DEPTH || !isRecord(schema.items) || spent > MAX_VALUES)
+      if (depth >= MAX_DEPTH || spent > MAX_VALUES) {
+        cut = true;
         return [];
-      return [value(name, schema.items, values, depth + 1)];
+      }
+      // Never an empty list: that is what a tool reads as "all of them".
+      // Where the schema does not say what goes in it, a word of the scan's.
+      return [
+        value(
+          name,
+          isRecord(schema.items) ? schema.items : { type: "string" },
+          values,
+          depth + 1,
+        ),
+      ];
     }
-    if (type === "object") return object(schema, values, depth + 1);
+    if (type === "object") {
+      const filled = object(schema, values, depth + 1);
+      // A map with no fixed keys gets one, named by the scan.
+      if (
+        Object.keys(filled).length === 0 &&
+        Object.keys(asSchema(schema.properties)).length === 0
+      ) {
+        const word = unique(values.text, (round) => `${values.text}-${round}`);
+        set(filled, word, word);
+      }
+      return filled;
+    }
     if (type === "null") return null;
     const kind = kindOf(name, schema);
     if (kind === "url") return values.url;
@@ -384,8 +449,18 @@ export function readSchema(document: unknown): SchemaReader {
       const others = values.others ?? [];
       return unique(values.path, (round) => others[round - 2] ?? values.path);
     }
-    if (schema.format === "date-time") return "2026-01-01T00:00:00Z";
-    if (schema.format === "date") return "2026-01-01";
+    if (schema.format === "date-time" || schema.format === "date") {
+      // Not a day anything of the user's is filed under. "Before" and
+      // "until" get the far past and "since" and "after" the far future, so
+      // a range of dates takes in nothing.
+      const day =
+        /(^|[^a-z])(since|after|from|start|begin|newer)($|[^a-z])/i.test(spaced)
+          ? "9999-12-31"
+          : "1970-01-02";
+      return schema.format === "date" ? day : `${day}T00:00:00Z`;
+    }
+    // A switch written as a string.
+    if (soundsLikeSwitch(name)) return String(switchValue(name, false));
     if (schema.format === "email") return `${values.text}@example.com`;
     // A tool that replaces one text with another is given two that differ,
     // so a plain call changes the file and is seen to.
@@ -409,10 +484,16 @@ export function readSchema(document: unknown): SchemaReader {
     const properties = asSchema(schema.properties);
     const required = Array.isArray(schema.required) ? schema.required : [];
     const result: Record<string, unknown> = {};
-    if (depth > MAX_DEPTH) return result;
+    if (depth > MAX_DEPTH) {
+      if (required.length > 0) cut = true;
+      return result;
+    }
     for (const name of required) {
       if (typeof name !== "string") continue;
-      if (spent > MAX_VALUES) break;
+      if (spent > MAX_VALUES) {
+        cut = true;
+        break;
+      }
       set(result, name, value(name, asSchema(properties[name]), values, depth));
     }
     return result;
@@ -433,8 +514,11 @@ export function readSchema(document: unknown): SchemaReader {
       if (pointer.length > MAX_DEPTH * 2) return;
       const node = resolved(schema);
       if (typeof item === "string") {
-        // A string the schema pins to a few values is not free text.
+        // A string the schema pins to a few values is not free text, and a
+        // switch written as a string is not a place for a payload: any text
+        // in it may read as on.
         if (Array.isArray(node.enum) || node.const !== undefined) return;
+        if (soundsLikeSwitch(name) && kindOf(name, node) === "text") return;
         if (found.length >= MAX_POINTS) {
           skipped += 1;
           return;
@@ -473,7 +557,21 @@ export function readSchema(document: unknown): SchemaReader {
 
   return {
     described: Object.keys(asSchema(resolved(root).properties)).length > 0,
-    truncated: () => spent > MAX_VALUES,
+    truncated: () => cut,
+    confirms() {
+      // Followed through a $ref, and one object down.
+      const walk = (given: SchemaNode, depth: number): boolean => {
+        const schema = resolved(given);
+        const properties = asSchema(schema.properties);
+        const required = Array.isArray(schema.required) ? schema.required : [];
+        return required.some((name) => {
+          if (typeof name !== "string") return false;
+          if (CONFIRMS.test(words(name))) return true;
+          return depth < 3 && walk(asSchema(properties[name]), depth + 1);
+        });
+      };
+      return walk(root, 0);
+    },
     plain(values) {
       begin();
       return object(root, values, 0);
@@ -491,6 +589,15 @@ export function readSchema(document: unknown): SchemaReader {
       const found: { name: string; value: unknown }[] = [];
       for (const [name, property] of Object.entries(properties)) {
         if (required.has(name)) continue;
+        // An optional switch is not added, whatever type it is written as.
+        // A path named backup_file is a path, and is added.
+        if (
+          CONFIRMS.test(words(name)) ||
+          (soundsLikeSwitch(name) &&
+            kindOf(name, asSchema(property)) === "text")
+        ) {
+          continue;
+        }
         // An optional object is filled in with its own strings, required or
         // not, so a path one level down is reached too.
         const node = resolved(asSchema(property));
@@ -570,8 +677,10 @@ function hasString(value: unknown): boolean {
 function wrongValue(type: string | undefined): unknown {
   if (type === "string") return UNUSED_NUMBER;
   if (type === "integer" || type === "number") return "seven";
-  if (type === "array") return "gauntlet";
-  if (type === "object") return "gauntlet";
+  // A number where a list goes. Not a string: a tool that walks a list
+  // would walk its letters, and act on a name one letter long. Nothing in
+  // place of an object, which would leave every part of it out.
+  if (type === "array") return UNUSED_NUMBER;
   return undefined;
 }
 

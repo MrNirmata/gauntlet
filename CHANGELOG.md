@@ -6,7 +6,7 @@
 - A finding is something the scan saw: a planted secret in a reply, as text or as base64, a planted file that changed, a marker file a payload created, a server that exited or stopped answering, a result for a call its schema rules out. Each has the call that caused it and one line on the fix.
 - `--plan` lists the tools a scan would call and why the others are left alone, and calls nothing.
 - With no flag a scan calls only tools marked or named as reading. `--write` adds the tools that nothing marks or names either way, and `--destructive` adds the ones marked or named as removing, sending, or spending, and the ones that require a confirmation. Naming a tool with `--tool` calls it.
-- Every payload names only something the scan made. None is `..` alone or an empty string, and a required argument is left out only of a tool marked read-only.
+- Every string the scan makes up names only something the scan made. None is `..` alone or an empty string, no list is sent empty, a date is one nothing is filed under, and a required argument is left out only of a tool marked read-only. A tool whose schema is deeper than the scan fills in is not called.
 - A path that leaves a directory is sent only to an argument seen to work in the scan's own directory. The evidence is the reply or the file the argument named, never a file the server wrote for itself, and it is kept for each argument.
 - A plain call sets switches and options to what their names say does less, and adds no optional one. The calls that break the schema leave them alone.
 - The scan checks that its own directories are still directories, and not links a call put there, before it lists, writes, or removes anything in them.

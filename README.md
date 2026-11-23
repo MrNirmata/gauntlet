@@ -21,7 +21,7 @@ gauntlet scan --mcp "node {cwd}/dist/server.js"
 
 3. safety  shell-injection  grep_notes.pattern  CWE-78
    A command inside the argument ran: a ; and a command created the marker file it names.
-   call: {"name":"grep_notes","arguments":{"pattern":"gauntlet-b102cf42; touch /tmp/gauntlet-scan-x/guard/guard/outer/gauntlet-marker-1-9c41d0"}}
+   call: {"name":"grep_notes","arguments":{"pattern":"gauntlet-b102cf42; touch /tmp/gauntlet-scan-x/guard/guard/gauntlet-b102cf42-outer/gauntlet-marker-1-9c41d0"}}
    fix:  Do not build a shell command from an argument. Pass the arguments to the program as a list, with no shell.
    5 more payloads on this argument did the same.
 ```
@@ -119,7 +119,7 @@ gauntlet scan --mcp "python3 {cwd}/server.py" --env API_KEY --tool search,fetch
 A scan makes up the arguments of every call, so how much it calls is yours to say, in three steps.
 
 - `--plan` calls nothing. It lists the tools, which of them a scan would call, and why the others are left alone. Run it first on a server you did not write.
-- With no flag, a scan calls only the tools that are marked or named as reading: one the server marks read-only, or one whose name starts with `get_`, `list_`, `read_`, `search_`, `find_`, `fetch_` and the like. That is where a path that leaves the directory or a `file://` address is most often found, and a tool that only reads has little to lose.
+- With no flag, a scan calls only the tools that are marked or named as reading: one the server marks read-only, or one whose name starts with `get_`, `list_`, `read_`, `search_`, `find_`, `fetch_` and the like and has no word after that which changes something, or could. `get_user` is called. `get_post`, `list_add`, and `get_and_delete` are not. That is where a path that leaves the directory or a `file://` address is most often found, and a tool that only reads has little to lose.
 - `--write` also calls the tools that nothing marks or names either way: `save_note`, `add`, `create_directory`. They change things, with made-up arguments. Run it where the server's data is a copy.
 - `--destructive` also calls the tools marked or named as removing, sending, or spending.
 
@@ -170,12 +170,13 @@ web_search      scanned  14     refused     1        0      0
 
 A scan calls tools with made-up arguments. These rules are what it keeps to, in every mode.
 
-- It calls only what you let it. Without `--write` that is the tools marked or named as reading. A name that looks and then does more, like `get_and_delete`, is not one of them, and neither is a tool that requires an argument named `confirm` or `force`.
-- Every payload names only something the scan made. A path that leaves the directory ends in a name with `gauntlet-` and the scan's eight random characters in it, or goes through the scan's own temp directory. No payload is `..` alone, an empty string, `/`, `~`, or a path of yours, and the value that is 10000 arrays deep has a word at its centre. Wherever a tool resolves such a path, it does not name a file that was there before.
-- A required argument is not left out, unless the server marks the tool read-only. A missing argument names nothing, and is what a tool is most likely to read as "all of them" or as its own default file.
+- It calls only what you let it. Without `--write` that is the tools marked or named as reading. A name that looks and then does more, like `get_and_delete`, is not one of them, and neither is a tool that requires an argument named `confirm` or `force`, at the top of its schema or one object down. A mark that is not `true` or `false` is read the careful way.
+- Every string the scan makes up names only something the scan made. A path that leaves the directory ends in a name with `gauntlet-` and the scan's eight random characters in it, or goes through the scan's own temp directory. None is `..` alone, an empty string, `/`, `~`, or a path of yours, and the value that is 10000 arrays deep has a word at its centre. Wherever a tool resolves such a path, it does not name a file that was there before. A value the schema itself fixes, with `const` or `enum`, is sent as the schema gives it.
+- A list is never sent empty, and a date is one nothing of yours is filed under: 1970-01-02, or 9999-12-31 for an argument named `since` or `after`, so a range of dates takes in nothing.
+- A required argument is not left out, unless the server marks the tool read-only. A missing argument names nothing, and is what a tool is most likely to read as "all of them" or as its own default file. A tool whose schema is deeper or wider than the scan fills in is not called, for the same reason.
 - A path that leaves a directory is sent only to an argument that was seen to work in the scan's own directory: the reply held text that only the file it named holds, or the file it named changed or appeared. That keeps what the scan leaves behind out of a directory it cannot see. It is evidence, not proof: a tool can use one argument in two places.
-- A switch is set to what does less: `dry_run` on, `force` off, `keep_existing` on. An option with a list of values gets the one that does least by its name: `list` before `delete_all`, `append` before `replace`. A switch or an option is not added when it is optional, and is not given a wrong value by the calls that break the schema. These go by names, and a name can mislead.
-- The scan's own files are in a directory four levels inside a new temp directory. Before it lists, writes, or removes anything there, it checks that each of those directories is still a directory and not a link a call put in its place.
+- A switch is set to what does less: `dry_run` on, `force` off, `keep_existing` on. An option with a list of values gets the one that does least by its name: `list` before `delete_all`, `append` before `replace`. A switch or an option is not added when it is optional, and is not given a wrong value by the calls that break the schema, whatever type the schema writes it as. These go by names, and a name can mislead.
+- The scan's own files are in a directory four levels inside a new temp directory. Before it lists, writes, or removes anything there, it checks that each of those directories is still a directory and not a link a call put in its place. That holds for what a call left behind. It is a check and then an act, so a server that keeps swapping them while the scan works can still get between the two.
 - The server's environment has `PATH`, `LANG`, a temp `HOME`, a temp `TMPDIR`, and no other variable of yours. A tool that needs a token does not have one unless you pass it with `--env`.
 - A tool that runs commands by design, by its name or its description, is not sent the command payloads, and neither is an argument that is itself a command. The commands the scan tries to inject only `touch` a file in its temp directory.
 - A misspelled `--tool`, `--skip`, or `--ignore` name is an error before any tool is called.

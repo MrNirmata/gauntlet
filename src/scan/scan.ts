@@ -30,7 +30,6 @@ import {
 import { track } from "../cleanup.ts";
 import {
   type BaseValues,
-  isRecord,
   nature,
   readSchema,
   type SchemaReader,
@@ -584,6 +583,9 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
           const { points, skipped } = reader.points(reader.plain(values));
           strings = points.length;
           unreached = skipped;
+          if (reader.truncated() && tool.annotations?.readOnlyHint !== true) {
+            reason ??= TOO_DEEP;
+          }
         } catch {
           reason ??= UNREADABLE;
         }
@@ -727,6 +729,11 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
       cut = reader.truncated();
     } catch {
       return row("skipped", { reason: UNREADABLE });
+    }
+    // A call would leave out something the schema requires. That is sent
+    // only to a tool the server marks read-only.
+    if (cut && tool.annotations?.readOnlyHint !== true) {
+      return row("skipped", { reason: TOO_DEEP });
     }
 
     const before = findings.length;
@@ -1018,7 +1025,9 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
     const reasons: string[] = [];
     if (stopped !== undefined) reasons.push(stopped);
     if (cut) {
-      reasons.push("its schema asks for more values than a scan fills in");
+      reasons.push(
+        "its schema is deeper or wider than a scan fills in, so part of each call was left out",
+      );
     }
     if (tooLarge.has(tool.name)) {
       reasons.push(
@@ -1067,6 +1076,8 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
 }
 
 const UNREADABLE = "its schema could not be read";
+const TOO_DEEP =
+  "its schema is deeper or wider than a scan fills in, and a call would leave a required part out";
 
 // Why a tool is left alone, or undefined when it is called.
 function skipReason(tool: McpTool, options: ScanOptions): string | undefined {
@@ -1077,33 +1088,34 @@ function skipReason(tool: McpTool, options: ScanOptions): string | undefined {
   // Named with --tool: the user asked for this one.
   if (options.destructive || options.only.includes(tool.name)) return undefined;
   const marks = tool.annotations ?? {};
+  // A mark that is not true or false is read the careful way: "true" or 1
+  // for destructive counts as yes, and anything but true for read-only
+  // counts as no.
+  const destructive =
+    marks.destructiveHint === undefined || marks.destructiveHint === null
+      ? undefined
+      : marks.destructiveHint !== false;
+  const readOnly =
+    marks.readOnlyHint === undefined || marks.readOnlyHint === null
+      ? undefined
+      : marks.readOnlyHint === true;
   const writes = (reason: string): string | undefined =>
     options.write ? undefined : reason;
-  if (marks.destructiveHint === true) return HELD.marked;
-  if (marks.readOnlyHint === true) return undefined;
+  if (destructive === true) return HELD.marked;
+  if (readOnly === true) return undefined;
   // A tool that will not run without "confirm" or "force" is asking whether
   // the caller means it. A scan does not.
-  const schema = isRecord(tool.inputSchema) ? tool.inputSchema : {};
-  const required = Array.isArray(schema.required) ? schema.required : [];
-  if (
-    required.some(
-      (name) =>
-        typeof name === "string" &&
-        /(^|[^a-z])(confirm|confirmed|confirmation|force|yes)($|[^a-z])/i.test(
-          words(name),
-        ),
-    )
-  ) {
-    return HELD.confirm;
+  try {
+    if (readSchema(tool.inputSchema).confirms()) return HELD.confirm;
+  } catch {
+    // A schema that cannot be read is said so where the tool is called.
   }
-  if (marks.readOnlyHint === false) {
+  if (readOnly === false) {
     // The protocol's default for a tool that is not read-only is destructive.
-    return marks.destructiveHint === false
-      ? writes(WRITES.marked)
-      : HELD.unmarked;
+    return destructive === false ? writes(WRITES.marked) : HELD.unmarked;
   }
   // What the server says outright counts for more than a name.
-  if (marks.destructiveHint === false) return writes(WRITES.marked);
+  if (destructive === false) return writes(WRITES.marked);
   const says = nature(tool.name);
   if (says === "removes") return HELD.named;
   return says === "reads" ? undefined : writes(WRITES.unknown);
@@ -1226,7 +1238,7 @@ function probesFor(given: {
   if (given.withPaths) {
     // Every one of these names a place the scan made. None is empty, and
     // none goes further up than the scan's own directories reach.
-    const created = `gauntlet-created-${token(3)}.txt`;
+    const created = `${canaries.values.text}-created-${token(3)}.txt`;
     const relative: [string, string, string?][] = [
       ["a path that starts with ../", `../${secretName}`],
       [
@@ -1255,7 +1267,7 @@ function probesFor(given: {
         ...(creates === undefined ? {} : { creates }),
       });
     }
-    const made = `gauntlet-created-${token(3)}.txt`;
+    const made = `${canaries.values.text}-created-${token(3)}.txt`;
     probes.push(
       { what: "an absolute path", value: canaries.secretFile, outside: true },
       {
@@ -1330,7 +1342,8 @@ function plainTemp(): string {
 function plant(): Canaries {
   const id = token(4);
   const top = mkdtempSync(path.join(plainTemp(), "gauntlet-scan-"));
-  const root = path.join(top, "guard", "guard", "outer");
+  // Named by the scan, like everything else a path can end in.
+  const root = path.join(top, "guard", "guard", `gauntlet-${id}-outer`);
   const workspace = path.join(root, "workspace");
   const home = path.join(root, "home");
   const outsideDir = path.join(root, `gauntlet-${id}-outside-dir`);
@@ -1403,7 +1416,19 @@ function plant(): Canaries {
       if (stat?.isDirectory() === true) continue;
       // Removing a symlink removes the link, not what it points at.
       if (stat !== undefined) rmSync(directory, { force: true });
-      mkdirSync(directory);
+      mkdirSync(directory, { mode: 0o700 });
+    }
+  };
+  // Whether a path's directory is where its name says, with no link on the
+  // way. Looked at again just before the scan removes or writes there. It
+  // narrows what a process still running can do between the check and the
+  // act, and does not close it.
+  const direct = (target: string): boolean => {
+    try {
+      const parent = path.dirname(target);
+      return realpathSync(parent) === parent;
+    } catch {
+      return false;
     }
   };
   // A file of the scan's own, read only if it is a plain file of a size the
@@ -1418,6 +1443,7 @@ function plant(): Canaries {
     }
   };
   const write = (file: string, body: string): void => {
+    if (!direct(file)) return;
     if (read(file) === body) return;
     removeTree(file, top);
     // A new file, never one that is already there under another name.
@@ -1440,6 +1466,7 @@ function plant(): Canaries {
     link(outsideDir, here(linkDir));
   };
   const remove = (target: string): void => {
+    if (!direct(target)) return;
     // A call left something that cannot be removed. It is not reported
     // again on every later call.
     if (!removeTree(target, top)) stuck.add(target);

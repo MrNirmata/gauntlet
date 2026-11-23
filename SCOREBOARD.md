@@ -150,7 +150,7 @@ list_allowed_directories   scanned  1      answered    0        0      0        
 
 0 safety, 0 robustness, 0 notes.
 10 of 10 scanned tools answered a plain call.
-3 tools were not called because nothing says they only read. --write calls them too, with made-up arguments.
+3 tools were not called because nothing marks or names them as only reading. --write calls them too, with made-up arguments.
 3 tools were not called because they are marked or named as removing, sending, or spending. --destructive calls them too.
 ```
 

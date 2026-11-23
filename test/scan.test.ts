@@ -850,12 +850,20 @@ test("marks and names decide which tools are left alone", async () => {
     // What the server says outright counts for more than the name.
     delete_cache:
       "the server marks it as not destructive, and not as read-only",
-    get_post: undefined,
+    // "post" and "email" may be what it looks at, or what it does.
+    get_post: unknown,
     list_orders: undefined,
-    read_email: undefined,
+    read_email: unknown,
     toString: unknown,
     seed_store: "it requires a confirmation",
     list_and_purge: named,
+    // Found through the $ref the schema starts with.
+    get_report: "it requires a confirmation",
+    // A mark that is not true or false is read the careful way.
+    get_b: "the server marks it destructive",
+    get_d:
+      "the server says it is not read-only, and the default for that is destructive",
+    wipe_g: "the server marks it destructive",
   };
   expect(reasons(told.report)).toEqual(expected);
   // --write adds the ones that change things without removing any.
@@ -863,6 +871,8 @@ test("marks and names decide which tools are left alone", async () => {
   expect(reasons(write.report)).toEqual({
     ...expected,
     delete_cache: undefined,
+    get_post: undefined,
+    read_email: undefined,
     toString: undefined,
   });
   const all = await lab("marks", "--plan", "--destructive");
@@ -1059,16 +1069,23 @@ test("a directory a call made read-only costs neither the report nor the cleanup
 
 test("a schema made to be expensive does not stop a scan or a plan", async () => {
   const started = Date.now();
+  const deep =
+    "its schema is deeper or wider than a scan fills in, and a call would leave a required part out";
+  // 60 required properties, each the whole schema again. A call made from
+  // it would be missing most of what it requires, so none is made.
   const plan = await lab("wide", "--plan");
   expect(plan.code).toBe(0);
-  expect(plan.report.tools.map((tool) => tool.status)).toEqual([
-    "planned",
-    "planned",
-  ]);
+  expect(row(plan.report, "tree")).toMatchObject({
+    status: "skipped",
+    reason: deep,
+  });
+  expect(row(plan.report, "ping").status).toBe("planned");
   const ran = await lab("wide");
-  expect(row(ran.report, "tree").reason).toContain(
-    "its schema asks for more values than a scan fills in",
-  );
+  expect(row(ran.report, "tree")).toMatchObject({
+    status: "skipped",
+    reason: deep,
+    calls: 0,
+  });
   expect(row(ran.report, "ping").plain).toBe("answered");
   expect(row((await lab("minlength")).report, "pad").plain).toBe("answered");
   expect(Date.now() - started).toBeLessThan(20_000);
@@ -1314,7 +1331,8 @@ test("a plain call has every required argument, with a value that does little", 
     // A switch that forces is left off, and one that does less is on.
     force: false,
     dryRun: true,
-    since: "2026-01-01T00:00:00Z",
+    // A day nothing is filed under: "since" gets one that takes in nothing.
+    since: "9999-12-31T00:00:00Z",
     url: "http://127.0.0.1:1/ok",
     command: "echo word",
     // A second text argument gets a word of its own.
@@ -1582,32 +1600,58 @@ test("a name says whether a tool removes, sends, or spends", () => {
 
 test("a name says whether a tool only looks", () => {
   for (const name of [
-    "get_post",
+    "get_user",
     "list_orders",
-    "read_email",
-    "search_mail",
+    "search_files",
     "grep",
     "fetchPage",
     "describe_table",
+    "list_allowed_directories",
   ]) {
     expect(nature(name), name).toBe("reads");
   }
-  // A second verb, or one that is never a noun, says it does more.
+  // A second verb, or one that is never a noun, says it does more. So does
+  // one run together with what it acts on.
   for (const name of [
     "check_and_delete",
     "get_and_remove",
     "read_and_clear",
     "fetch_and_prune",
     "list_and_purge",
+    "get_deleteall",
+    "find_dropdb",
+    "list_wipedisk",
     "trash_note",
     "discard_changes",
     "git_stash",
     "close_account",
     "trim_history",
+    "XMLDelete",
+    "deletefile",
   ]) {
     expect(nature(name), name).toBe("removes");
   }
+  // A word that may be what it looks at or what it does, a word that
+  // writes, or a word this cannot read: none of them is "only looks".
+  const pieces = ["status", "\u00e4ndern"];
   for (const name of [
+    "get_post",
+    "read_email",
+    "search_mail",
+    "list_pop",
+    "status_reset",
+    "get_revert",
+    "preview_publish",
+    "list_add",
+    "status_update",
+    "get_set",
+    "getSet",
+    "read_write_file",
+    "query_execute",
+    "check_out",
+    "checkIn",
+    JSON.parse(`"${pieces.join("")}"`),
+    "read2write",
     "add",
     "write_file",
     "save_note",
@@ -1703,4 +1747,137 @@ test("an option, a switch, and a number get the value that does least", () => {
       .violations({ when: "never", note: "x" }, () => false)
       .map((item) => item.label),
   ).toEqual(["note as a number, where the schema says string"]);
+});
+
+test("a call is never built with an empty list, a missing part, or a real date", () => {
+  const reader = readSchema({
+    required: ["keys", "pair", "files", "before", "since", "day"],
+    properties: {
+      // Nothing says what goes in these. Empty is what a tool reads as all.
+      keys: { type: "array" },
+      pair: { type: "array", prefixItems: [{ type: "string" }] },
+      files: { type: "object", additionalProperties: { type: "string" } },
+      before: { type: "string", format: "date-time" },
+      since: { type: "string", format: "date" },
+      day: { type: "string", format: "date" },
+    },
+  });
+  expect(reader.plain(values)).toEqual({
+    keys: ["word"],
+    pair: ["word-2"],
+    files: { "word-3": "word-3" },
+    // A range of dates that takes in nothing, and a day nothing is filed under.
+    before: "1970-01-02T00:00:00Z",
+    since: "9999-12-31",
+    day: "1970-01-02",
+  });
+  expect(reader.truncated()).toBe(false);
+  // Eight objects deep, each requiring the next. Past what a scan fills in,
+  // a required part would be missing, and the reader says so.
+  let deep: Record<string, unknown> = {
+    type: "object",
+    required: ["file"],
+    properties: { file: { type: "string" } },
+  };
+  for (let level = 0; level < 8; level += 1) {
+    deep = { type: "object", required: ["next"], properties: { next: deep } };
+  }
+  const nested = readSchema(deep);
+  nested.plain(values);
+  expect(nested.truncated()).toBe(true);
+  const shallow = readSchema({
+    type: "object",
+    required: ["a"],
+    properties: {
+      a: {
+        type: "object",
+        required: ["file"],
+        properties: { file: { type: "string" } },
+      },
+    },
+  });
+  expect(shallow.plain(values)).toEqual({ a: { file: "note.txt" } });
+  expect(shallow.truncated()).toBe(false);
+});
+
+test("a wrong type is never a word a tool could take for a name", () => {
+  const reader = readSchema({
+    required: ["paths", "target", "name"],
+    properties: {
+      paths: { type: "array", items: { type: "string" } },
+      target: {
+        type: "object",
+        required: ["dir"],
+        properties: { dir: { type: "string" } },
+      },
+      name: { type: "string" },
+    },
+  });
+  const built = reader.plain(values);
+  const wrong = reader.violations(built, () => false);
+  // A number where a list goes: a tool that walks it has nothing to walk.
+  // Nothing in place of the object, which would leave its parts out.
+  expect(wrong.map((item) => item.label)).toEqual([
+    "paths as a number, where the schema says array",
+    "name as a number, where the schema says string",
+  ]);
+  expect(wrong[0]?.arguments.paths).toBe(987654321);
+});
+
+test("a confirmation is found through a $ref and one object down", () => {
+  const byRef = readSchema({
+    $ref: "#/definitions/Args",
+    definitions: {
+      Args: {
+        type: "object",
+        properties: { confirm: { const: true }, name: { type: "string" } },
+        required: ["confirm", "name"],
+      },
+    },
+  });
+  expect(byRef.confirms()).toBe(true);
+  const nested = readSchema({
+    required: ["options"],
+    properties: {
+      options: {
+        type: "object",
+        required: ["force"],
+        properties: { force: { enum: [true] } },
+      },
+    },
+  });
+  expect(nested.confirms()).toBe(true);
+  // Optional, so the tool runs without it.
+  expect(
+    readSchema({
+      required: ["name"],
+      properties: { name: { type: "string" }, confirm: { type: "boolean" } },
+    }).confirms(),
+  ).toBe(false);
+});
+
+test("a switch written as a string is set like a switch, gets no payload, and is not added", () => {
+  const names = [
+    "name",
+    "dry_run",
+    "overwrite",
+    "force",
+    "delete_existing",
+    "backup_file",
+  ];
+  const reader = readSchema({
+    required: ["name", "dry_run"],
+    properties: Object.fromEntries(
+      names.map((name) => [name, { type: "string" }]),
+    ),
+  });
+  const built = reader.plain(values);
+  expect(built).toEqual({ name: "word", dry_run: "true" });
+  expect(reader.points(built).points.map((point) => point.label)).toEqual([
+    "name",
+  ]);
+  // backup_file is a path with a word like a switch's in it. It is added.
+  expect(reader.optional(values).map((extra) => extra.name)).toEqual([
+    "backup_file",
+  ]);
 });
