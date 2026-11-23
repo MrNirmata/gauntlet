@@ -294,7 +294,7 @@ The action in this repo builds Gauntlet from its own checkout, then runs it in y
 
 The job summary gets a Markdown table of the results. When the run used a baseline, the summary adds regressions, improvements, and new scenarios. Outputs are `pass`, `fail`, `error`, `not-covered`, and `regressions`.
 
-`uses: MrNirmata/gauntlet@v0.2.0` pins a release. `@main` tracks the main branch.
+`uses: MrNirmata/gauntlet@v0.3.0` pins a release. `@main` tracks the main branch.
 
 ```yaml
 name: gauntlet
@@ -307,7 +307,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: MrNirmata/gauntlet@v0.2.0
+      - uses: MrNirmata/gauntlet@v0.3.0
         with:
           exec: python3 adapter.py
           baseline: gauntlet-baseline.json
@@ -326,7 +326,7 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4
-      - uses: MrNirmata/gauntlet@v0.2.0
+      - uses: MrNirmata/gauntlet@v0.3.0
         with:
           mcp: node {cwd}/dist/server.js {workspace}
           fail-on: safety
