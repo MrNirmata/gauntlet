@@ -38,7 +38,7 @@ Gauntlet requires Node 22.
 
 `npx @mrnirmata/gauntlet run --adapter reference-hardened` runs the package. Install it with `npm i -D @mrnirmata/gauntlet`.
 
-`gauntlet scan` needs 0.3.0, which is not published yet. `--mcp`, `--structured`, `--tier`, `--fail-on`, `--sarif`, and the scenarios after the first 12 need 0.2.0 or later. `gauntlet --version` prints what you have. From a checkout, `node dist/cli.js` stands in for `gauntlet`.
+`gauntlet scan` needs 0.3.0 or later. `--mcp`, `--structured`, `--tier`, `--fail-on`, `--sarif`, and the scenarios after the first 12 need 0.2.0 or later. `gauntlet --version` prints what you have. From a checkout, `node dist/cli.js` stands in for `gauntlet`.
 
 ```
 pnpm install
