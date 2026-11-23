@@ -5,14 +5,17 @@
 - Add `gauntlet scan --mcp <command>`. It reads the tools an MCP server lists and the schema of each one, makes a plain call from the schema, puts payloads in every string argument, and sends calls the schema forbids. It works on a server with any tools, not only file tools.
 - A finding is something the scan saw: a planted secret in a reply, as text or as base64, a planted file that changed, a marker file a payload created, a server that exited or stopped answering, a result for a call its schema rules out. Each has the call that caused it and one line on the fix.
 - `--plan` lists the tools a scan would call and why the others are left alone, and calls nothing.
-- A tool is not called when the server marks it destructive or its name says it removes, sends, or spends. `--destructive` calls those, and so does naming one with `--tool`.
-- A path that leaves a directory is sent only to a tool whose plain call was seen to work in the scan's own directory. A server that keeps its data elsewhere is not sent `../`.
-- The report has a row for each tool: how many calls, whether the plain call got a result, how many string arguments got payloads, and what was not sent. A scan in which no tool answered a plain call exits 2.
-- A server that gives a result for a tool that does not exist gets one `soft-errors` note, and no finding that depends on telling a result from an error.
-- The server is started in a temp directory with `PATH`, a temp `HOME`, a temp `TMPDIR`, and nothing else of the user's. `--env` passes a variable on.
+- A tool is not called when the server marks it destructive, marks it not read-only and says no more, or has a name that says it removes, sends, or spends. `--destructive` calls those, and so does naming one with `--tool`.
+- A path that leaves a directory is sent only to an argument seen to work in the scan's own directory. The evidence is the reply or the file the argument named, never a file the server wrote for itself, and it is kept for each argument. A server that keeps its data elsewhere is not sent `../`.
+- A plain call sets switches to what does less and picks an option that only looks. The calls that break the schema leave switches alone, and leave an argument out only where that is seen to be safe.
+- The report has a row for each tool: how many calls, whether the plain call got a result, how many string arguments got payloads, how many of those got paths that leave a directory, and what was held back. A scan in which no tool answered a plain call exits 2.
+- A server that gives a result for a tool that does not exist gets one `soft-errors` note, and no finding that depends on telling a result from an error. A result that reads as a refusal is not counted as accepting a bad call.
+- A reply over 4 MiB is not a finding. The row says it was too large to read.
+- The server is started in a temp directory with `PATH`, `LANG`, a temp `HOME`, a temp `TMPDIR`, and nothing else of the user's. `--env` passes a variable on.
 - `--tool`, `--skip`, `--ignore <kind[:tool]>`, `--fail-on`, `--max-calls`, and `--json` for the scan. A name the server does not have is an error before any call.
-- An interrupt, a hangup, or a failed start leaves no server process and no temp directory.
-- What a server says about itself is escaped before it is printed, so a tool name cannot move the cursor or clear the screen.
+- An interrupt, a hangup, or a failed start leaves no server process and no temp directory. A directory a call made read-only is removed too.
+- A schema with thousands of nested required properties, or a `minLength` of millions, is filled in up to a limit and the row says so.
+- What a server says about itself is escaped before it is printed, in the text report and in `--json`, so a tool name cannot move the cursor or clear the screen.
 - The README's action examples pin `v0.2.0`.
 
 ## 0.2.0

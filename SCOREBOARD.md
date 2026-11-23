@@ -130,23 +130,23 @@ node dist/cli.js scan --mcp "node <path>/node_modules/@modelcontextprotocol/serv
 scan: server-filesystem@2.4.0
 server: secure-filesystem-server 2.4.0
 
-tool                       status   calls  plain call  strings  findings
-read_file                  scanned  26     answered    1        0
-read_text_file             scanned  26     answered    1        0
-read_media_file            scanned  26     answered    1        0
-read_multiple_files        scanned  26     answered    1        0
-write_file                 skipped  -      -           -        -         the server marks it destructive
-append_file                scanned  51     answered    2        0
-edit_file                  skipped  -      -           -        -         the server marks it destructive
-create_directory           scanned  28     answered    1        0
-list_directory             scanned  27     answered    1        0
-list_directory_with_sizes  scanned  27     answered    1        0
-directory_tree             scanned  50     answered    2        0
-move_file                  skipped  -      -           -        -         the server marks it destructive
-copy_file                  scanned  51     answered    2        0
-search_files               scanned  47     answered    3        0         paths that leave a directory were not sent: the plain call was not seen to work in the scan's directory
-get_file_info              scanned  20     answered    1        0         paths that leave a directory were not sent: the plain call was not seen to work in the scan's directory
-list_allowed_directories   scanned  1      answered    0        0         it publishes no arguments, so only a plain call was made
+tool                       status   calls  plain call  strings  paths  findings
+read_file                  scanned  26     answered    1        1      0
+read_text_file             scanned  26     answered    1        1      0
+read_media_file            scanned  26     answered    1        1      0
+read_multiple_files        scanned  26     answered    1        1      0
+write_file                 skipped  -      -           -        -      -         the server marks it destructive
+append_file                scanned  40     answered    2        1      0
+edit_file                  skipped  -      -           -        -      -         the server marks it destructive
+create_directory           scanned  28     answered    1        1      0
+list_directory             scanned  27     answered    1        1      0
+list_directory_with_sizes  scanned  28     answered    1        1      0
+directory_tree             scanned  41     answered    2        1      0
+move_file                  skipped  -      -           -        -      -         the server marks it destructive
+copy_file                  scanned  51     answered    2        2      0
+search_files               scanned  50     answered    3        0      0         no path that leaves a directory was sent to path: not seen to name a file in the scan's directory
+get_file_info              scanned  21     answered    1        0      0         no path that leaves a directory was sent to path: not seen to name a file in the scan's directory
+list_allowed_directories   scanned  1      answered    0        0      0         it publishes no arguments, so only a plain call was made
 
 0 safety, 0 robustness, 0 notes.
 13 of 13 scanned tools answered a plain call.
@@ -159,31 +159,31 @@ The server marks `write_file`, `edit_file`, and `move_file` destructive, so a sc
 scan: server-filesystem@2.4.0
 server: secure-filesystem-server 2.4.0
 
-tool                       status   calls  plain call  strings  findings
-read_file                  scanned  26     answered    1        0
-read_text_file             scanned  26     answered    1        0
-read_media_file            scanned  26     answered    1        0
-read_multiple_files        scanned  26     answered    1        0
-write_file                 scanned  51     answered    2        0
-append_file                scanned  51     answered    2        0
-edit_file                  scanned  74     answered    3        0
-create_directory           scanned  28     answered    1        0
-list_directory             scanned  27     answered    1        0
-list_directory_with_sizes  scanned  27     answered    1        0
-directory_tree             scanned  50     answered    2        0
-move_file                  scanned  51     answered    2        0
-copy_file                  scanned  51     answered    2        0
-search_files               scanned  47     answered    3        0         paths that leave a directory were not sent: the plain call was not seen to work in the scan's directory
-get_file_info              scanned  20     answered    1        0         paths that leave a directory were not sent: the plain call was not seen to work in the scan's directory
-list_allowed_directories   scanned  1      answered    0        0         it publishes no arguments, so only a plain call was made
+tool                       status   calls  plain call  strings  paths  findings
+read_file                  scanned  26     answered    1        1      0
+read_text_file             scanned  26     answered    1        1      0
+read_media_file            scanned  26     answered    1        1      0
+read_multiple_files        scanned  26     answered    1        1      0
+write_file                 scanned  40     answered    2        1      0
+append_file                scanned  40     answered    2        1      0
+edit_file                  scanned  53     answered    3        1      0
+create_directory           scanned  28     answered    1        1      0
+list_directory             scanned  27     answered    1        1      0
+list_directory_with_sizes  scanned  28     answered    1        1      0
+directory_tree             scanned  41     answered    2        1      0
+move_file                  scanned  51     answered    2        2      0
+copy_file                  scanned  51     answered    2        2      0
+search_files               scanned  50     answered    3        0      0         no path that leaves a directory was sent to path: not seen to name a file in the scan's directory
+get_file_info              scanned  21     answered    1        0      0         no path that leaves a directory was sent to path: not seen to name a file in the scan's directory
+list_allowed_directories   scanned  1      answered    0        0      0         it publishes no arguments, so only a plain call was made
 
 0 safety, 0 robustness, 0 notes.
 16 of 16 scanned tools answered a plain call.
 ```
 
-Sixteen tools, each called with between 1 and 74 argument sets. No reply held the planted secret or the name of a planted file, nothing beside the directory changed, no injected command ran, and the server never exited or stopped answering. All 16 tools gave a result for a plain call, so the empty list is about a server that was doing its work.
+Sixteen tools, each called with between 1 and 53 argument sets. No reply held the planted secret or the name of a planted file, nothing beside the directory changed, no injected command ran, and the server never exited or stopped answering. All 16 tools gave a result for a plain call, so the empty list is about a server that was doing its work.
 
-Two rows say what was not tried. `get_file_info` returns sizes and dates, and `search_files` matched nothing with the word it was given, so neither was seen to read the scan's directory, and neither was sent a path that leaves one. The other 13 tools that take a path were.
+The `paths` column says where a traversal was looked for. Thirteen tools have an argument that was seen to read, list, or change a file in the scan's directory, and each such argument was sent the paths that leave it. `move_file` and `copy_file` have two. Two rows say what was not tried: `get_file_info` returns sizes and dates, and `search_files` matched nothing with the word it was given, so neither was seen to use its path there.
 
 The scan does not send the Unicode names or the hard link of the fixed suite, so the five fails in the table above are not in it.
 

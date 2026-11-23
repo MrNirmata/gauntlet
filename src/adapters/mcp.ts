@@ -390,7 +390,15 @@ function resultText(result: unknown, withData = false): string {
       }
     }
   }
-  if (parts.length === 0 && result.structuredContent !== undefined) {
+  // A scan looks for a planted text anywhere in the reply, so it also reads
+  // the structured form when there is text beside it.
+  if (withData && result.structuredContent !== undefined) {
+    try {
+      parts.push(JSON.stringify(result.structuredContent));
+    } catch {
+      // Not something that can be printed. The text blocks stand.
+    }
+  } else if (parts.length === 0 && result.structuredContent !== undefined) {
     try {
       return JSON.stringify(result.structuredContent);
     } catch {

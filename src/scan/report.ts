@@ -1,5 +1,11 @@
-import { printable } from "../text.ts";
-import type { Finding, FindingKind, FindingTier, ScanReport } from "./scan.ts";
+import { printable, printableJson } from "../text.ts";
+import {
+  type Finding,
+  type FindingKind,
+  type FindingTier,
+  HELD,
+  type ScanReport,
+} from "./scan.ts";
 
 // What to change, one line for each kind of finding.
 const FIX: Readonly<Record<FindingKind, string>> = {
@@ -51,6 +57,7 @@ export function formatScan(report: ScanReport): string {
       quiet ? "-" : String(tool.calls),
       quiet ? "-" : tool.plain,
       tool.status === "skipped" ? "-" : String(tool.strings),
+      quiet ? "-" : String(tool.paths),
       quiet ? "-" : String(tool.findings),
       clean(tool.reason ?? ""),
     ];
@@ -62,6 +69,7 @@ export function formatScan(report: ScanReport): string {
       "calls",
       "plain call",
       "strings",
+      "paths",
       "findings",
       "",
     ]),
@@ -141,10 +149,9 @@ export function formatScan(report: ScanReport): string {
       `No finding means little for ${quiet === scanned.length ? "them" : `the other ${quiet}`}: a tool that turns every call down gives nothing to find.`,
     );
   }
+  const reasons: readonly string[] = Object.values(HELD);
   const held = report.tools.filter(
-    (tool) =>
-      tool.reason === "the server marks it destructive" ||
-      tool.reason === "its name says it removes, sends, or spends",
+    (tool) => tool.reason !== undefined && reasons.includes(tool.reason),
   );
   if (held.length > 0) {
     lines.push(
@@ -154,11 +161,16 @@ export function formatScan(report: ScanReport): string {
   if (report.stopped !== undefined) {
     lines.push(`The scan ended early: ${clean(report.stopped)}.`);
   }
+  if (report.leftover !== undefined) {
+    lines.push(
+      `A call left something that could not be removed. It is in ${clean(report.leftover)}.`,
+    );
+  }
   return `${lines.join("\n")}\n`;
 }
 
 export function formatScanJson(report: ScanReport): string {
-  return `${JSON.stringify(
+  const json = JSON.stringify(
     {
       name: report.name,
       server: report.server,
@@ -168,10 +180,15 @@ export function formatScanJson(report: ScanReport): string {
         fix: FIX[finding.kind],
       })),
       totals: scanTotals(report.findings),
+      ...(report.stopped === undefined ? {} : { stopped: report.stopped }),
+      ...(report.leftover === undefined ? {} : { leftover: report.leftover }),
     },
     null,
     2,
-  )}\n`;
+  );
+  // What a server says about itself is in here. A control or format
+  // character in it is written as an escape, as in the text report.
+  return `${printableJson(json)}\n`;
 }
 
 const clean = printable;
@@ -181,7 +198,10 @@ function table(
   headers: readonly string[],
 ): string {
   const widths = headers.map((header, index) =>
-    Math.max(header.length, ...rows.map((row) => (row[index] ?? "").length)),
+    rows.reduce(
+      (width, row) => Math.max(width, (row[index] ?? "").length),
+      header.length,
+    ),
   );
   const render = (row: readonly string[]): string =>
     row

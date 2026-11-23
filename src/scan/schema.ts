@@ -21,6 +21,10 @@ export type BaseValues = {
   readonly url: string;
   // A word for an argument that is plain text.
   readonly text: string;
+  // More files that exist there, for a second and a third path argument.
+  // Each argument gets a value no other has, so what a call did can be put
+  // down to the argument that named it.
+  readonly others?: readonly string[];
 };
 
 // One place in the arguments where a string goes.
@@ -40,6 +44,11 @@ export type Violation = {
 
 const MAX_DEPTH = 4;
 export const MAX_POINTS = 16;
+// How many values one call is built from. A schema that asks for more is
+// filled in as far as this and no further.
+const MAX_VALUES = 2000;
+// The longest string made to satisfy a minLength.
+const MAX_PADDING = 4096;
 // An id nothing has. A tool that acts on a record, a process, or a port by
 // number is given this one and not 1.
 const UNUSED_NUMBER = 987_654_321;
@@ -57,9 +66,33 @@ const URL_NAME =
 const COMMAND_NAME = /(^|[^a-z])(command|commands|cmd|shell|script)($|[^a-z])/i;
 const ID_NAME =
   /(^|[^a-z])(id|ids|pid|uid|gid|port|index|offset|number)($|[^a-z])/i;
-// A switch that makes a call do less. It is turned on.
+// A switch that makes a call do less. It is turned on, unless its name
+// turns it round: no_dry_run, skip_safety_check, disable_preview.
 const SAFE_SWITCH =
   /(^|[^a-z])(dry|dryrun|preview|simulate|noop|readonly|safe|check)($|[^a-z])/i;
+const NEGATED =
+  /(^|[^a-z])(no|not|non|skip|disable|disabled|without|dont|never|bypass|ignore|suppress|omit)($|[^a-z])/i;
+// A switch that makes a call do more. It is left off whatever its default.
+const RISKY_SWITCH =
+  /(^|[^a-z])(force|overwrite|recursive|delete|remove|purge|all|confirm|confirmed|yes|hard|permanent)($|[^a-z])/i;
+
+// What a name says a tool or an option does. The name is all there is to go
+// on: most servers mark nothing.
+const CHANGES =
+  /(^|[^a-z])(delete|remove|rm|rmdir|unlink|drop|destroy|purge|prune|wipe|erase|clear|clean|cleanup|empty|truncate|flush|expire|evict|kill|terminate|stop|halt|shutdown|reboot|restart|send|post|publish|deploy|release|pay|charge|refund|transfer|withdraw|purchase|buy|order|book|email|mail|sms|tweet|notify|invite|merge|push|reset|revert|rollback|format|uninstall|revoke|ban|block|cancel|overwrite|migrate|migration|apply)($|[^a-z])/i;
+// The same verbs run together with what they act on: deletefile, dropdb.
+const CHANGES_PREFIX =
+  /^(delete|remove|rmdir|unlink|drop|destroy|purge|wipe|erase|truncate|kill|uninstall)/i;
+// A name that starts by saying it only looks: get_post, list_orders.
+const LOOKS =
+  /^(get|list|read|search|find|fetch|show|view|describe|count|query|lookup|check|is|has|stat|info|status|peek|inspect|ls|cat|head|tail|diff|compare|validate|verify|explain|preview)($|[^a-z])/i;
+
+// Whether a name says the thing removes, sends, or spends.
+export function soundsDestructive(name: string): boolean {
+  const spaced = words(name);
+  if (LOOKS.test(spaced)) return false;
+  return CHANGES.test(spaced) || CHANGES_PREFIX.test(spaced);
+}
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -69,8 +102,12 @@ export function asSchema(value: unknown): SchemaNode {
   return isRecord(value) ? value : {};
 }
 
-function words(name: string): string {
-  return name.replace(/([a-z])([A-Z])/g, "$1_$2");
+// A name with its words apart: readFile and XMLDelete as read_File and
+// XML_Delete.
+export function words(name: string): string {
+  return name
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2");
 }
 
 // What an argument is for, from its name, its format, and its description.
@@ -82,9 +119,17 @@ export function kindOf(name: string, schema: SchemaNode): ArgumentKind {
   if (schema.format === "uri" || schema.format === "url") return "url";
   if (URL_NAME.test(spaced)) return "url";
   if (COMMAND_NAME.test(spaced)) return "command";
-  if (PATH_NAME.test(spaced)) return "path";
   const description =
     typeof schema.description === "string" ? schema.description : "";
+  // Said outright, which counts for more than a name like "input".
+  if (
+    /\b(shell )?command\b[^.]{0,30}\b(to )?(run|execute)\b|\b(run|execute)s?\b[^.]{0,30}\bcommand\b/i.test(
+      description,
+    )
+  ) {
+    return "command";
+  }
+  if (PATH_NAME.test(spaced)) return "path";
   if (
     /\b(file|directory|folder) ?(path|name)\b|\bpath to\b/i.test(description)
   ) {
@@ -111,6 +156,9 @@ function typeOf(schema: SchemaNode): string | undefined {
 export type SchemaReader = {
   // Whether the tool published a schema with any argument in it.
   readonly described: boolean;
+  // Whether the last call built was cut short because the schema asks for
+  // more values than a scan fills in.
+  truncated(): boolean;
   // The arguments of a plain call: every required property, nothing else.
   plain(values: BaseValues): Record<string, unknown>;
   // Optional properties that hold a string, each with the value it would
@@ -122,28 +170,37 @@ export type SchemaReader = {
     points: StringPoint[];
     skipped: number;
   };
-  // Calls the schema forbids. withMissing adds the calls that leave a
-  // required argument out.
-  violations(base: Record<string, unknown>, withMissing: boolean): Violation[];
+  // Calls the schema forbids. canDrop says which arguments may also be left
+  // out, to see whether the server notices one is missing.
+  violations(
+    base: Record<string, unknown>,
+    canDrop: (name: string) => boolean,
+  ): Violation[];
 };
 
 export function readSchema(document: unknown): SchemaReader {
   const root = asSchema(document);
 
+  // The schema a $ref names, when it names one in this document.
+  const target = (given: SchemaNode): SchemaNode | undefined => {
+    const ref = given.$ref;
+    if (ref === "#") return root;
+    if (typeof ref !== "string" || !ref.startsWith("#/")) return undefined;
+    let node: unknown = root;
+    for (const part of ref.slice(2).split("/")) {
+      const key = part.replaceAll("~1", "/").replaceAll("~0", "~");
+      node = isRecord(node) ? node[key] : undefined;
+    }
+    return isRecord(node) ? node : undefined;
+  };
+
   // A schema that points elsewhere in the document is read there. A schema
   // that offers alternatives is read as its first one.
   const resolved = (given: SchemaNode, hops = 0): SchemaNode => {
     if (hops > 8) return given;
-    const ref = given.$ref;
-    if (typeof ref === "string" && ref.startsWith("#/")) {
-      let node: unknown = root;
-      for (const part of ref.slice(2).split("/")) {
-        const key = part.replaceAll("~1", "/").replaceAll("~0", "~");
-        node = isRecord(node) ? node[key] : undefined;
-      }
-      if (isRecord(node)) {
-        return resolved({ ...given, $ref: undefined, ...node }, hops + 1);
-      }
+    const named = target(given);
+    if (named !== undefined) {
+      return resolved({ ...given, $ref: undefined, ...named }, hops + 1);
     }
     for (const key of ["anyOf", "oneOf", "allOf"]) {
       const options = given[key];
@@ -159,12 +216,37 @@ export function readSchema(document: unknown): SchemaReader {
     return given;
   };
 
-  // More than one type is allowed here, so no one wrong type can be named.
-  const open = (given: SchemaNode): boolean =>
-    Array.isArray(given.type) ||
-    Array.isArray(given.anyOf) ||
-    Array.isArray(given.oneOf) ||
-    Array.isArray(given.allOf);
+  // More than one type is allowed here, or somewhere a $ref leads, so no
+  // one wrong type can be named.
+  const open = (given: SchemaNode, hops = 0): boolean => {
+    if (
+      Array.isArray(given.type) ||
+      Array.isArray(given.anyOf) ||
+      Array.isArray(given.oneOf) ||
+      Array.isArray(given.allOf)
+    ) {
+      return true;
+    }
+    const named = target(given);
+    return named !== undefined && hops < 8 && open(named, hops + 1);
+  };
+
+  // What one call has been given so far. No two arguments get the same
+  // string where another one can be made.
+  let spent = 0;
+  let taken = new Set<string>();
+  const begin = (): void => {
+    spent = 0;
+    taken = new Set();
+  };
+  const unique = (text: string, next: (round: number) => string): string => {
+    let candidate = text;
+    for (let round = 2; taken.has(candidate) && round < 40; round += 1) {
+      candidate = next(round);
+    }
+    taken.add(candidate);
+    return candidate;
+  };
 
   const value = (
     name: string,
@@ -174,12 +256,26 @@ export function readSchema(document: unknown): SchemaReader {
   ): unknown => {
     const schema = resolved(given);
     if (schema.const !== undefined) return schema.const;
+    spent += 1;
     if (Array.isArray(schema.enum) && schema.enum.length > 0) {
-      return schema.enum[0];
+      // Of the values allowed, one that only looks, or failing that one
+      // whose name does not say it removes or sends.
+      const named = schema.enum.filter(
+        (option): option is string => typeof option === "string",
+      );
+      return (
+        named.find((option) => LOOKS.test(words(option))) ??
+        named.find((option) => !soundsDestructive(option)) ??
+        schema.enum[0]
+      );
     }
     const type = typeOf(schema);
     const spaced = words(name);
-    if (type === "boolean") return SAFE_SWITCH.test(spaced);
+    if (type === "boolean") {
+      if (SAFE_SWITCH.test(spaced)) return !NEGATED.test(spaced);
+      if (RISKY_SWITCH.test(spaced)) return false;
+      return typeof schema.default === "boolean" ? schema.default : false;
+    }
     if (type === "integer" || type === "number") {
       const low = typeof schema.minimum === "number" ? schema.minimum : 1;
       const high =
@@ -190,29 +286,43 @@ export function readSchema(document: unknown): SchemaReader {
       return Math.min(Math.max(wanted, low), high);
     }
     if (type === "array") {
-      if (depth >= MAX_DEPTH || !isRecord(schema.items)) return [];
+      if (depth >= MAX_DEPTH || !isRecord(schema.items) || spent > MAX_VALUES)
+        return [];
       return [value(name, schema.items, values, depth + 1)];
     }
     if (type === "object") return object(schema, values, depth + 1);
     if (type === "null") return null;
     const kind = kindOf(name, schema);
-    let text = values.text;
+    if (kind === "url") return values.url;
+    if (kind === "command") return `echo ${values.text}`;
     if (kind === "path") {
-      if (FRESH_NAME.test(spaced)) text = values.fresh;
-      else if (DIR_NAME.test(spaced)) text = values.dir;
-      else text = values.path;
-    } else if (kind === "url") text = values.url;
-    else if (kind === "command") text = `echo ${values.text}`;
-    else if (schema.format === "date-time") text = "2026-01-01T00:00:00Z";
-    else if (schema.format === "date") text = "2026-01-01";
-    else if (schema.format === "email") text = `${values.text}@example.com`;
+      if (FRESH_NAME.test(spaced)) {
+        const dot = values.fresh.lastIndexOf(".");
+        const cut = dot > 0 ? dot : values.fresh.length;
+        return unique(
+          values.fresh,
+          (round) =>
+            `${values.fresh.slice(0, cut)}-${round}${values.fresh.slice(cut)}`,
+        );
+      }
+      if (DIR_NAME.test(spaced)) return values.dir;
+      const others = values.others ?? [];
+      return unique(values.path, (round) => others[round - 2] ?? values.path);
+    }
+    if (schema.format === "date-time") return "2026-01-01T00:00:00Z";
+    if (schema.format === "date") return "2026-01-01";
+    if (schema.format === "email") return `${values.text}@example.com`;
     // A tool that replaces one text with another is given two that differ,
     // so a plain call changes the file and is seen to.
-    else if (NEW_TEXT_NAME.test(spaced)) text = `${values.text}-new`;
-    const least = typeof schema.minLength === "number" ? schema.minLength : 0;
-    return kind === "text" && text.length < least
-      ? text.padEnd(least, "g")
-      : text;
+    const word = NEW_TEXT_NAME.test(spaced)
+      ? `${values.text}-new`
+      : values.text;
+    const text = unique(word, (round) => `${word}-${round}`);
+    const least =
+      typeof schema.minLength === "number"
+        ? Math.min(schema.minLength, MAX_PADDING)
+        : 0;
+    return text.length < least ? text.padEnd(least, "g") : text;
   };
 
   const object = (
@@ -227,6 +337,7 @@ export function readSchema(document: unknown): SchemaReader {
     if (depth > MAX_DEPTH) return result;
     for (const name of required) {
       if (typeof name !== "string") continue;
+      if (spent > MAX_VALUES) break;
       set(result, name, value(name, asSchema(properties[name]), values, depth));
     }
     return result;
@@ -287,8 +398,16 @@ export function readSchema(document: unknown): SchemaReader {
 
   return {
     described: Object.keys(asSchema(resolved(root).properties)).length > 0,
-    plain: (values) => object(root, values, 0),
+    truncated: () => spent > MAX_VALUES,
+    plain(values) {
+      begin();
+      return object(root, values, 0);
+    },
     optional(values) {
+      // After the required ones, so an optional argument gets a value none
+      // of them has.
+      begin();
+      object(root, values, 0);
       const schema = resolved(root);
       const properties = asSchema(schema.properties);
       const required = new Set(
@@ -324,7 +443,7 @@ export function readSchema(document: unknown): SchemaReader {
       return found;
     },
     points,
-    violations(base, withMissing) {
+    violations(base, canDrop) {
       const schema = resolved(root);
       const properties = asSchema(schema.properties);
       const found: Violation[] = [];
@@ -332,6 +451,9 @@ export function readSchema(document: unknown): SchemaReader {
         const declared = asSchema(properties[name]);
         const property = resolved(declared);
         const type = typeOf(property);
+        // A switch is left as the plain call set it. A wrong value for one
+        // may read as on, and leaving it out gives the tool's own default.
+        if (type === "boolean") continue;
         const wrong = wrongValue(type);
         if (wrong !== undefined && !open(declared) && !open(property)) {
           found.push({
@@ -339,7 +461,7 @@ export function readSchema(document: unknown): SchemaReader {
             arguments: withValue(base, name, wrong),
           });
         }
-        if (!withMissing) continue;
+        if (!canDrop(name)) continue;
         const without = clone(base);
         delete without[name];
         found.push({
@@ -365,7 +487,6 @@ function hasString(value: unknown): boolean {
 function wrongValue(type: string | undefined): unknown {
   if (type === "string") return UNUSED_NUMBER;
   if (type === "integer" || type === "number") return "seven";
-  if (type === "boolean") return "gauntlet";
   if (type === "array") return "gauntlet";
   if (type === "object") return "gauntlet";
   return undefined;

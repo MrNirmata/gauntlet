@@ -81,17 +81,20 @@ scan options:
   --plan                     list what would be called and why, and call nothing
   --destructive              also call tools marked or named as removing, sending, or
                              spending. Without it they are left alone
-  --env <NAME[=value]>       give the server this variable. It gets PATH and a temp HOME,
+  --env <NAME[=value]>       give the server this variable. It gets PATH, LANG, a temp HOME,
                              and no other variable of yours, unless you name it
   --ignore <kind[:tool]>     leave findings of this kind out of the report and the exit code
-  --fail-on <tier>           any, safety, robustness, or none
+  --fail-on <tier>           any, safety, robustness, or none. The default is any
   --max-calls <n>            calls per tool. The default is 300
   --json, --name, --timeout  as for run
 
 exit codes:
-  0  no scenario that decides the run failed, errored, or regressed
-  1  a scenario that decides the run failed, errored, or regressed
-  2  the command line, the adapter, or a file was wrong
+  0  no scenario that decides the run failed, errored, or regressed.
+     For a scan: no finding of a tier that --fail-on counts
+  1  a scenario that decides the run failed, errored, or regressed.
+     For a scan: a finding of a tier that --fail-on counts
+  2  the command line, the adapter, or a file was wrong.
+     For a scan: also when no tool answered a plain call, so nothing was tested
 `;
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -362,9 +365,12 @@ async function scanCommand(
     index += 1;
     if (token === "--mcp") mcp = value;
     else if (token === "--name") name = value;
-    else if (token === "--tool") only.push(...splitList(value));
-    else if (token === "--skip") skip.push(...splitList(value));
-    else if (token === "--timeout" || token === "--max-calls") {
+    else if (token === "--tool" || token === "--skip") {
+      // "," names nothing. Read as no filter, --tool would scan every tool.
+      const names = splitList(value);
+      if (names.length === 0) return fail(`missing ${token} value`);
+      (token === "--tool" ? only : skip).push(...names);
+    } else if (token === "--timeout" || token === "--max-calls") {
       if (!/^[1-9]\d*$/.test(value) || Number(value) > MAX_TIMEOUT_MS) {
         return fail(`invalid ${token}`);
       }
@@ -412,6 +418,9 @@ async function scanCommand(
       timeoutMs,
       only,
       skip,
+      ignored: ignore.flatMap((rule) =>
+        rule.tool === undefined ? [] : [rule.tool],
+      ),
       destructive,
       env,
       maxCallsPerTool: maxCalls,
@@ -421,15 +430,6 @@ async function scanCommand(
     // A misspelled tool name is found before anything is called.
     if (error instanceof ScanUsageError) return fail(error.message);
     return fail(`could not scan the MCP server: ${errorLine(error)}`);
-  }
-  const names = report.tools.map((row) => row.name);
-  const stray = ignore.find(
-    (rule) => rule.tool !== undefined && !names.includes(rule.tool),
-  );
-  if (stray !== undefined) {
-    return fail(
-      `--ignore names ${stray.tool}, which is not a tool of this server. Its tools: ${names.join(", ")}`,
-    );
   }
   const keep = (finding: ScanReport["findings"][number]): boolean =>
     !ignore.some(

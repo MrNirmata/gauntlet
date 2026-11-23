@@ -136,23 +136,25 @@ A finding is never a guess. Each one is something the scan saw:
 | loopback-fetch      | note       | The server fetched an address on this machine that an argument gave it.           |
 | soft-errors         | note       | The server gave a result for a tool that does not exist.                          |
 
-Each finding has the call that caused it, so you can send it again, and one line on the fix.
+Each finding has the call that caused it, so you can send it again, and one line on the fix. A file that appears outside is put down to the call that carried its name, however late it appeared. A change with no name on it that shows up after a later call is put down to the last call that named a place outside, and the finding says so.
 
 ### What the report says it did not test
 
 A scan that found nothing is worth as much as what it reached. The table has a row for each tool, and the row says how far the scan got.
 
 ```
-tool            status   calls  plain call  strings  findings
-read_file       scanned  26     answered    1        0
-write_file      skipped  -      -           -        -         the server marks it destructive
-get_file_info   scanned  20     answered    1        0         paths that leave a directory were not sent: the plain call was not seen to work in the scan's directory
-web_search      scanned  14     refused     1        0
+tool            status   calls  plain call  strings  paths  findings
+read_file       scanned  26     answered    1        1      0
+write_file      skipped  -      -           -        -      -         the server marks it destructive
+get_file_info   scanned  21     answered    1        0      0         no path that leaves a directory was sent to path: not seen to name a file in the scan's directory
+get_template    scanned  15     answered    1        0      0
+web_search      scanned  14     refused     1        0      0
 ```
 
 - `plain call: refused` means the tool turned down even a call with nothing odd in it, usually for a missing key or a file it wanted. No finding means little for that tool. `--env NAME` gives the server a variable it needs.
 - `strings` is how many string arguments got payloads. A tool with `0` was sent only the calls its schema forbids.
-- `paths that leave a directory were not sent` is on a tool that takes a path and was not seen to work in the scan's directory. The next section says why.
+- `paths` is how many of those strings were also sent paths that leave a directory. `get_template` above has one string and no paths: a traversal through it was not looked for. The next section says why.
+- When an argument that looks like a path got none, the row names it. It also says when the commands were held back, for a tool that runs commands by design.
 - A scan in which no tool answered a plain call exits 2. Nothing was tested, and that is not a pass.
 - A server with the `soft-errors` note reports a failure as an ordinary result. For that server a result proves nothing, so `phantom-tool` and `schema-not-enforced` are not reported for it.
 
@@ -160,15 +162,20 @@ web_search      scanned  14     refused     1        0
 
 A scan calls tools with made-up arguments. These rules are there so that a wrong guess stays cheap.
 
-- The server runs in a directory four levels inside a new temp directory, and no payload goes further than one level above it. Its environment has `PATH`, a temp `HOME`, a temp `TMPDIR`, and no other variable of yours. A tool that needs a token does not have one unless you pass it with `--env`.
-- A tool is not called if the server marks it destructive, or if its name says it removes, sends, or spends: `delete_`, `drop`, `send_`, `pay`, `publish`, `deploy`, and the like. `--destructive` calls those too, and so does naming one with `--tool`.
-- A path that leaves a directory, such as `../x`, is sent only to a tool that was seen to work in the scan's own directory: its plain call returned the note planted there, listed a file planted there, or changed something there. A server that keeps its data in a directory of yours would resolve `../x` against that directory, and the scan could not see what happened. Such a tool gets no such path.
-- A tool that was seen to work only with a path written in full gets paths written in full, all of them under the scan's temp directory.
+- The server runs in a directory four levels inside a new temp directory, and no payload goes further than one level above it. Its environment has `PATH`, `LANG`, a temp `HOME`, a temp `TMPDIR`, and no other variable of yours. A tool that needs a token does not have one unless you pass it with `--env`.
+- A tool is not called if the server marks it destructive, or marks it not read-only and says nothing more, or if its name says it removes, sends, or spends: `delete_`, `drop`, `clear`, `cleanup`, `send_`, `pay`, `publish`, `deploy`, and the like. A name that starts with `get_`, `list_`, `read_`, or `search_` is taken at its word. `--destructive` calls the rest too, and so does naming one with `--tool`.
+- A path that leaves a directory, such as `../x`, is sent only to an argument that was seen to work in the scan's own directory. That is decided for each argument, on evidence: the reply held text that only the file it named holds, or the file it named changed or appeared. A file the server writes for itself, a log or a cache, is not evidence. A server that keeps its data in a directory of yours would resolve `../x` against that directory, and the scan could not see what happened, so such an argument gets no such path.
+- An argument that was seen to work only with a path written in full gets paths written in full, all of them under the scan's temp directory.
+- Each argument of a call gets a value no other argument has, so what a call did can be put down to the argument that named it.
+- A switch is set to what does less: `dry_run` on, `force` off, `no_dry_run` off. An option with a list of values gets one that only looks, such as `list`, before one named `delete_all`. A switch is never left out or given a wrong value by the calls that break the schema.
+- A required argument is left out only of a tool the server marks read-only, or where the scan would see what that did.
 - Every name the scan makes up starts with `gauntlet-` and eight random characters. No payload is an empty string, `/`, `~`, or a path of yours. The commands it tries to inject only `touch` a file in its temp directory.
-- A tool that runs commands by design, by its name or its description, is not sent the command payloads. Running a command is not a finding there.
+- A tool that runs commands by design, by its name or its description, is not sent the command payloads, and neither is an argument that is itself a command. Running a command is not a finding there, and the row says they were held back.
 - A misspelled `--tool`, `--skip`, or `--ignore` name is an error before any tool is called.
 
 That is not a sandbox. The server is your code running as you. A tool that does harm under a name the scan does not recognise is called, and a server can reach the network. Scan a server whose worst case you accept, with the credentials you would give a test. SECURITY.md has the rest.
+
+A server started with `npx` or `uvx` downloads into the temp `HOME` every time it starts, and may not answer in time. Install it first and name the file: `--mcp "node /path/to/server/dist/index.js"`.
 
 ### Options
 

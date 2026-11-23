@@ -18,25 +18,29 @@ Point it at code you would run anyway.
 
 What limits the harm of a made-up call:
 
-- The server is started in a temp directory with `PATH`, a temp `HOME`, a temp `TMPDIR`, and no other variable of yours, so a tool that needs a token has none. A variable you pass with `--env` is one the server can use on anything.
-- A tool is left alone when the server marks it destructive or when its name says it removes, sends, or spends. `--destructive`, or naming the tool with `--tool`, calls it.
+- The server is started in a temp directory with `PATH`, `LANG`, a temp `HOME`, a temp `TMPDIR`, and no other variable of yours, so a tool that needs a token has none. A variable you pass with `--env` is one the server can use on anything.
+- A tool is left alone when the server marks it destructive, when the server marks it not read-only and does not say it is not destructive, or when its name says it removes, sends, or spends. `--destructive`, or naming the tool with `--tool`, calls it.
 - The names of `--tool`, `--skip`, and `--ignore` are checked against the server's list before the first call. A misspelled `--skip` does not go on to call the tool it was meant to leave out.
-- A path that leaves a directory is sent only to a tool whose plain call was seen to work in the scan's own directory. Without that, the server may keep its data somewhere else, and `../x` would be read against that place.
+- A path that leaves a directory is sent only to an argument that was seen to work in the scan's own directory: the reply held what only the file it named holds, or what it named changed or appeared. It is decided for each argument, not for the tool. A file the server made for itself does not count. Without that evidence the server may keep its data somewhere else, and `../x` would be read against that place.
 - The server's directory is four levels inside the temp directory the scan made. No payload goes further than one level above it, which is still inside.
-- Every name the scan makes up starts with `gauntlet-` and eight random characters. It sends no empty string, no `/`, no `~`, and no path of yours. The commands it tries to inject only `touch` a file in its temp directory, and the path of that directory has no space or shell character in it. If the system temp directory has one, `/tmp` is used, and if that has one too the scan stops.
-- A missing required argument is sent only to a tool that takes no string, or that was seen to work in the scan's directory.
+- Every name the scan makes up starts with `gauntlet-` and eight random characters. It sends no empty string, no `/`, no `~`, and no path of yours. The value that is 10000 arrays deep has a word at its centre, so a server that flattens it does not get an empty name. The commands it tries to inject only `touch` a file in its temp directory, and the path of that directory has no space or shell character in it. If the system temp directory has one, `/tmp` is used, and if that has one too the scan stops.
+- A switch is set to what does less, and the calls that break the schema leave every switch as it was. An option with a list of values gets one that only looks, when there is one.
+- A required argument is left out only of a tool the server marks read-only, or of an argument seen to name a file in the scan's directory. A missing argument is what a tool is most likely to read as "all of them".
 
 What it does not limit:
 
 - The server is your code, running as you, with your files and your network. The environment is trimmed. Nothing else is confined.
 - A tool that does harm under a name the scan does not recognise, and that the server does not mark, is called. Most servers mark nothing.
-- A server that keeps its data in a fixed place gets plain calls there. They can leave files whose names start with `gauntlet-`, or a file named `987654321`, in that place.
-- A tool that takes an id is given `987654321`. If that id exists, the call acts on it.
+- A server that keeps its data in a fixed place gets calls there. They leave files and directories in that place. Their names start with `gauntlet-` and the scan's eight characters, or are `987654321`, and some have control characters, quotes, or a shell command after that. A server that makes directories for a path it is given can leave a tree of them, named after the scan's own temp path.
+- A tool that takes an id is given `987654321`, or the largest number its schema allows. If that id exists, the call acts on it.
+- A wrong type is still sent: a number where a string goes, a word where a number goes. What a tool does with that is the tool's.
+- A process a tool starts in a group of its own outlives the scan.
+- A tool that does its work after it answers is not seen to work in the scan's directory, so its arguments get no path that leaves one.
 - A server can still reach the network with whatever a tool does by default.
 
 Scan a server whose worst case you accept, with test credentials or none.
 
-A scan with no findings does not mean the server is safe. The scan tries the payloads it has, on the arguments it can see. A tool that turned down its plain call was not exercised, and a tool that was not seen to work in the scan's directory was not sent a path that leaves one. The report says which tools those are, and a scan in which no tool answered exits 2.
+A scan with no findings does not mean the server is safe. The scan tries the payloads it has, on the arguments it can see. A tool that turned down its plain call was not exercised, and an argument that was not seen to work in the scan's directory was not sent a path that leaves one. The report's `plain call` and `paths` columns say which those are, and a scan in which no tool answered exits 2.
 
 ## What the sandbox is
 

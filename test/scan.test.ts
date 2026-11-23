@@ -14,7 +14,12 @@ import path from "node:path";
 import { Writable } from "node:stream";
 import { expect, test } from "vitest";
 import { runCli } from "../src/cli.ts";
-import { kindOf, readSchema, withString } from "../src/scan/schema.ts";
+import {
+  kindOf,
+  readSchema,
+  soundsDestructive,
+  withString,
+} from "../src/scan/schema.ts";
 
 async function run(
   argv: readonly string[],
@@ -44,6 +49,7 @@ type Row = {
   plain: string;
   anchored: boolean;
   strings: number;
+  paths: number;
   unreached: number;
   findings: number;
 };
@@ -65,6 +71,7 @@ type Report = {
   }[];
   totals: { safety: number; robustness: number; note: number };
   stopped?: string;
+  leftover?: string;
 };
 
 const NODE = `"${process.execPath}"`;
@@ -218,7 +225,7 @@ test("the same server written safely gives a scan nothing to report", async () =
       status: "scanned",
       plain: "answered",
     });
-    expect(row(report, name).calls, name).toBeGreaterThan(3);
+    expect(row(report, name).calls, name).toBeGreaterThan(2);
   }
   expect(row(report, "needs_key")).toMatchObject({
     status: "scanned",
@@ -246,11 +253,13 @@ test("the text report says what was not looked at", async () => {
   ]);
   expect(result.code).toBe(0);
   expect(result.stdout).toMatch(
-    /^scan: zoo\nserver: zoo safe\n\ntool +status +calls +plain call +strings +findings\n/,
+    /^scan: zoo\nserver: zoo safe\n\ntool +status +calls +plain call +strings +paths +findings\n/,
   );
-  expect(result.stdout).toMatch(/\nneeds_key +scanned +\d+ +refused +1 +0\n/);
   expect(result.stdout).toMatch(
-    /\ndrop_all +skipped +- +- +- +- +the server marks it destructive\n/,
+    /\nneeds_key +scanned +\d+ +refused +1 +0 +0\n/,
+  );
+  expect(result.stdout).toMatch(
+    /\ndrop_all +skipped +- +- +- +- +- +the server marks it destructive\n/,
   );
   expect(result.stdout).toContain(
     "0 safety, 0 robustness, 0 notes.\n9 of 10 scanned tools answered a plain call.\nNo finding means little for the other 1: a tool that turns every call down gives nothing to find.\n1 tool was not called because it is marked or named as removing, sending, or spending. --destructive calls it too.\n",
@@ -390,6 +399,9 @@ test("a bad command line or a server that cannot start exits 2", async () => {
     [["scan"], "missing --mcp\n"],
     [["scan", "--mcp"], "missing --mcp value\n"],
     [["scan", "--mcp", "true", "--nope"], "unknown argument --nope\n"],
+    // A list with nothing in it is not "every tool".
+    [["scan", "--mcp", "true", "--tool", ","], "missing --tool value\n"],
+    [["scan", "--mcp", "true", "--skip", " , "], "missing --skip value\n"],
     [["scan", "--mcp", "true", "--timeout", "0"], "invalid --timeout\n"],
     [
       ["scan", "--mcp", "true", "--fail-on", "maybe"],
@@ -460,12 +472,26 @@ test("a tool named for removing or sending is not called unless asked for", asyn
     );
     expect(called()).toEqual([]);
 
+    // So is a misspelled --ignore.
+    const stray = await run([
+      "scan",
+      "--mcp",
+      `${LAB} log ${log}`,
+      "--ignore",
+      "crash:list_thing",
+    ]);
+    expect(stray.code).toBe(2);
+    expect(stray.stderr).toMatch(
+      /^--ignore names list_thing, which is not a tool/,
+    );
+    expect(called()).toEqual([]);
+
     // --plan lists what would be called and calls nothing.
     const plan = await run(["scan", "--mcp", `${LAB} log ${log}`, "--plan"]);
     expect(plan.code).toBe(0);
-    expect(plan.stdout).toMatch(/\nlist_things +planned +- +- +0 +-\n/);
+    expect(plan.stdout).toMatch(/\nlist_things +planned +- +- +0 +- +-\n/);
     expect(plan.stdout).toMatch(
-      /\nsend_email +skipped +- +- +- +- +its name says it removes, sends, or spends\n/,
+      /\nsend_email +skipped +- +- +- +- +- +its name says it removes, sends, or spends\n/,
     );
     expect(plan.stdout).toContain(
       "1 of 4 tools would be called. No tool was called.\n",
@@ -567,7 +593,7 @@ test("a tool is tried with each form of path until it is seen to work", async ()
     plain: "answered",
     anchored: false,
     reason:
-      "paths that leave a directory were not sent: the plain call was not seen to work in the scan's directory",
+      "no path that leaves a directory was sent to path: not seen to name a file in the scan's directory",
   });
 });
 
@@ -586,16 +612,32 @@ test("a schema that allows two types, or a strict boolean, is not a finding", as
   expect(report.findings).toEqual([]);
   expect(row(report, "set_value").plain).toBe("answered");
   expect(row(report, "toggle").plain).toBe("answered");
+  // A $ref to a schema that allows two types allows two types.
+  expect(row(report, "set_pair").plain).toBe("answered");
 });
 
 test("shell payloads go to every string, and a tool that runs commands is not an injection", async () => {
   const { report } = await lab("shell");
-  // zip_code has "code" in its name. It is still put into a command.
+  // zip_code has "code" in its name. It is still put into a command. So is
+  // the file of a tool whose description only mentions a command of its own.
   expect(kinds(report)).toEqual([
+    "robustness schema-not-enforced file_history",
     "robustness schema-not-enforced geo_lookup",
+    "safety shell-injection file_history file",
     "safety shell-injection geo_lookup zip_code",
   ]);
-  expect(row(report, "bash").findings).toBe(0);
+  // What was held back is said, not left out quietly.
+  expect(row(report, "bash")).toMatchObject({
+    plain: "answered",
+    findings: 0,
+    reason:
+      "no command was put in its arguments: the tool runs commands by design",
+  });
+  expect(row(report, "launch")).toMatchObject({
+    plain: "answered",
+    findings: 0,
+    reason: "no command was added to command: it takes a command",
+  });
   const zoo = await scan("vulnerable", "--tool", "run_shell");
   expect(row(zoo.report, "run_shell")).toMatchObject({
     plain: "answered",
@@ -616,7 +658,11 @@ test("a tool that only takes paths in full is given the escapes in full", async 
 
 test("a tool that removes what it is given does not end the scan", async () => {
   const before = scanDirs();
-  const { code, report } = await lab("clear");
+  // Its name says what it does, so it is called only when asked for.
+  expect(row((await lab("clear", "--plan")).report, "clear_path").status).toBe(
+    "skipped",
+  );
+  const { code, report } = await lab("clear", "--tool", "clear_path");
   expect(code).toBe(1);
   expect(kinds(report)).toContain("safety outside-write clear_path path");
   expect(row(report, "clear_path").calls).toBeGreaterThan(10);
@@ -633,6 +679,206 @@ test("a command that runs later is filed under the argument that carried it", as
     ["queue_search", "query"],
   ]);
   expect(row(report, "ping").findings).toBe(0);
+});
+
+// A pretend home: data the server keeps, data beside it, and a file above.
+function userHome(dir: string): { notes: string; listing: () => string[] } {
+  const notes = path.join(dir, "data", "notes");
+  mkdirSync(notes, { recursive: true });
+  mkdirSync(path.join(dir, "data", "exports"));
+  writeFileSync(path.join(notes, "todo.txt"), "todo\n");
+  writeFileSync(path.join(dir, "data", "other.txt"), "other\n");
+  writeFileSync(path.join(dir, "precious.txt"), "precious\n");
+  return {
+    notes,
+    // Everything but what the scan's plain calls left in the notes.
+    listing: () =>
+      [
+        ...readdirSync(dir).map((name) => name),
+        ...readdirSync(path.join(dir, "data")).map((name) => `data/${name}`),
+        ...readdirSync(notes)
+          .filter((name) => !/^(gauntlet-[0-9a-f]{8}|987654321)/.test(name))
+          .map((name) => `data/notes/${name}`),
+      ].sort(),
+  };
+}
+
+const INTACT = [
+  "data",
+  "data/exports",
+  "data/notes",
+  "data/notes.calls",
+  "data/notes/todo.txt",
+  "data/other.txt",
+  "precious.txt",
+];
+
+function sentTo(log: string, tool: string): Record<string, unknown>[] {
+  return readFileSync(log, "utf8")
+    .trim()
+    .split("\n")
+    .filter((line) => line.startsWith(`${tool} `))
+    .map((line) => JSON.parse(line.slice(tool.length + 1)));
+}
+
+// What would name the data directory itself or a place above it.
+const leaves = (value: unknown): boolean =>
+  value === "" || value === ".." || String(value).startsWith("../");
+
+test("a file the server writes for itself does not make a scan trust it", async () => {
+  await withDir(async (dir) => {
+    const home = userHome(dir);
+    // The server appends to server.log in the scan's directory on every
+    // call. That is not the tool using its argument there.
+    const { report } = await lab(`cwdlog ${home.notes}`);
+    for (const name of ["read_note", "save_note", "tidy"]) {
+      expect(row(report, name), name).toMatchObject({
+        anchored: false,
+        paths: 0,
+      });
+    }
+    expect(home.listing()).toEqual(INTACT);
+    expect(readFileSync(path.join(home.notes, "todo.txt"), "utf8")).toBe(
+      "todo\n",
+    );
+    const calls = `${home.notes}.calls`;
+    for (const tool of ["save_note", "tidy"]) {
+      const sent = sentTo(calls, tool);
+      expect(sent.length, tool).toBeGreaterThan(5);
+      for (const args of sent) {
+        // Always there, and never empty, even when the value was 10000
+        // nested arrays and the server took the string out of the middle.
+        expect(Object.hasOwn(args, "name"), JSON.stringify(args)).toBe(true);
+        expect(leaves(args.name), JSON.stringify(args)).toBe(false);
+      }
+    }
+    expect(
+      report.findings.filter((finding) => finding.tier === "safety"),
+    ).toEqual([]);
+  });
+});
+
+test("an argument seen to work in the scan's directory does not vouch for the one beside it", async () => {
+  await withDir(async (dir) => {
+    const home = userHome(dir);
+    const { report } = await lab(`mixed ${home.notes}`);
+    // source is read where the server runs, and is tried with ../. name goes
+    // to the data directory, and is not.
+    expect(row(report, "import_note")).toMatchObject({
+      plain: "answered",
+      anchored: true,
+      strings: 2,
+      paths: 1,
+    });
+    expect(kinds(report)).toContain("safety outside-read import_note source");
+    for (const args of sentTo(`${home.notes}.calls`, "import_note")) {
+      expect(leaves(args.name), JSON.stringify(args)).toBe(false);
+    }
+    expect(home.listing()).toEqual(INTACT);
+  });
+});
+
+test("a plain call picks the option and the switches that do least, and no later call undoes them", async () => {
+  await withDir(async (dir) => {
+    const log = path.join(dir, "calls.log");
+    await lab(`choices ${log}`);
+    const actions = sentTo(log, "manage_notes").map((args) => args.action);
+    expect(actions).toContain("list");
+    expect(actions).not.toContain("delete_all");
+    expect(actions).not.toContain("archive");
+    const synced = sentTo(log, "sync_things");
+    expect(synced.length).toBeGreaterThan(0);
+    // Every call, the ones meant to break the schema included.
+    for (const args of synced) {
+      expect(args).toEqual({
+        skip_safety_check: false,
+        no_dry_run: false,
+        disable_preview: false,
+        dry_run: true,
+        force: false,
+        keep: true,
+      });
+    }
+    // An argument is left out only where the scan would see what that did.
+    for (const args of sentTo(log, "count_rows")) {
+      expect(Object.keys(args).sort()).toEqual(["limit", "table"]);
+    }
+  });
+});
+
+test("marks and names decide which tools are left alone", async () => {
+  const { report } = await lab("marks", "--plan");
+  const named = "its name says it removes, sends, or spends";
+  const expected: Record<string, string | undefined> = {
+    clear_all: named,
+    cleanup: named,
+    prune_old: named,
+    deletefile: named,
+    XMLDelete: named,
+    DBDrop: named,
+    stop_server: named,
+    expire_sessions: named,
+    sync_state:
+      "the server says it is not read-only, and the default for that is destructive",
+    apply_plan: "the server marks it destructive",
+    delete_cache: undefined,
+    get_post: undefined,
+    list_orders: undefined,
+    read_email: undefined,
+    toString: undefined,
+  };
+  expect(
+    Object.fromEntries(report.tools.map((tool) => [tool.name, tool.reason])),
+  ).toEqual(expected);
+  // The server really has a tool called toString. Answering it is not
+  // answering a name it does not list.
+  const real = await lab("marks", "--tool", "toString,get_post");
+  expect(real.code).toBe(0);
+  expect(real.report.findings).toEqual([]);
+});
+
+test("a server that checks its arguments and says no in plain text is not marked down", async () => {
+  const { code, report } = await lab("softtool");
+  expect(report.findings).toEqual([]);
+  expect(code).toBe(0);
+  expect(row(report, "add").plain).toBe("answered");
+});
+
+test("a reply too large to read is said so, and is not a fault", async () => {
+  const { code, report } = await lab("big");
+  expect(report.findings).toEqual([]);
+  expect(code).toBe(0);
+  expect(row(report, "take_screenshot")).toMatchObject({ plain: "too large" });
+  expect(row(report, "take_screenshot").reason).toContain(
+    "a reply was too large to read, and the server was started again",
+  );
+  expect(row(report, "ping").plain).toBe("answered");
+});
+
+test("a directory a call made read-only costs neither the report nor the cleanup", async () => {
+  const before = scanDirs();
+  const { code, report } = await lab("locked");
+  expect(code).toBe(0);
+  expect(row(report, "fetch_module").plain).toBe("answered");
+  expect(report.leftover).toBeUndefined();
+  expect(scanDirs()).toEqual(before);
+});
+
+test("a schema made to be expensive does not stop a scan or a plan", async () => {
+  const started = Date.now();
+  const plan = await lab("wide", "--plan");
+  expect(plan.code).toBe(0);
+  expect(plan.report.tools.map((tool) => tool.status)).toEqual([
+    "planned",
+    "planned",
+  ]);
+  const ran = await lab("wide");
+  expect(row(ran.report, "tree").reason).toContain(
+    "its schema asks for more values than a scan fills in",
+  );
+  expect(row(ran.report, "ping").plain).toBe("answered");
+  expect(row((await lab("minlength")).report, "pad").plain).toBe("answered");
+  expect(Date.now() - started).toBeLessThan(20_000);
 });
 
 test("a scan in which nothing answered is not a clean scan", async () => {
@@ -745,6 +991,11 @@ test("a tool name from the server cannot draw on the terminal", async () => {
   const plan = await run(["scan", "--mcp", server, "--plan"]);
   expect(plan.stdout).not.toContain(esc);
   expect(plan.stdout).toContain("server: odd\\u001b[2J\n");
+  // --json too. What it prints is still JSON, and reads back as it was.
+  const json = await run(["scan", "--mcp", server, "--plan", "--json"]);
+  expect(json.stdout).not.toContain(esc);
+  expect(json.stdout).not.toContain(String.fromCharCode(13));
+  expect((JSON.parse(json.stdout) as Report).server).toBe(`odd${esc}[2J`);
   const fixed = await run([
     "run",
     "--mcp",
@@ -786,6 +1037,8 @@ test("an argument's kind comes from its name, its format, and its description", 
     ["name", { description: "Path to the file to read" }, "path"],
     ["where", { description: "The URL to fetch" }, "url"],
     ["title", {}, "text"],
+    // Said outright, which counts for more than a name like "input".
+    ["input", { description: "The shell command to run" }, "command"],
   ];
   for (const [name, schema, kind] of cases) {
     expect(kindOf(name, schema), name).toBe(kind);
@@ -861,7 +1114,8 @@ test("a plain call has every required argument, with a value that does little", 
     since: "2026-01-01T00:00:00Z",
     url: "http://127.0.0.1:1/ok",
     command: "echo word",
-    note: "wordgggggggg",
+    // A second text argument gets a word of its own.
+    note: "word-2gggggg",
     who: { email: "word@example.com" },
   });
   expect(readSchema(undefined).plain(values)).toEqual({});
@@ -937,32 +1191,188 @@ test("every free string is a place for a payload, and the ones left out are coun
   expect(wide.skipped).toBe(4);
 });
 
-test("a violation is a wrong type or a missing required argument", () => {
+test("a violation is a wrong type, and a missing argument only where that is safe", () => {
   const reader = readSchema({
-    required: ["a", "name", "either", "flag", "ref"],
+    required: ["a", "name", "either", "flag", "ref", "pair"],
     properties: {
       a: { type: "number" },
       name: { type: "string" },
       either: { anyOf: [{ type: "string" }, { type: "number" }] },
       flag: { type: "boolean" },
       ref: { $ref: "#/$defs/N" },
+      pair: { $ref: "#/properties/either" },
     },
     $defs: { N: { type: "integer" } },
   });
-  const base = { a: 1, name: "x", either: "y", flag: false, ref: 2 };
-  expect(reader.violations(base, false).map((item) => item.label)).toEqual([
+  const base = { a: 1, name: "x", either: "y", flag: false, ref: 2, pair: "z" };
+  const never = (): boolean => false;
+  // Nothing for either or pair, which allow two types. Nothing for flag: a
+  // wrong value for a switch may read as on.
+  expect(reader.violations(base, never).map((item) => item.label)).toEqual([
     "a as a string, where the schema says number",
     "name as a number, where the schema says string",
-    // Not "yes": a lenient validator reads that as true.
-    "flag as a string, where the schema says boolean",
     "ref as a string, where the schema says integer",
   ]);
-  expect(
-    reader.violations(base, false).find((item) => item.label.startsWith("flag"))
-      ?.arguments,
-  ).toMatchObject({ flag: "gauntlet" });
-  expect(reader.violations(base, true).map((item) => item.label)).toContain(
-    "no either, which the schema requires",
-  );
-  expect(readSchema({}).violations({}, true)).toEqual([]);
+  const dropped = reader
+    .violations(base, (name) => name === "name" || name === "flag")
+    .map((item) => item.label);
+  expect(dropped).toContain("no name, which the schema requires");
+  // A switch is never left out, whoever asks.
+  expect(dropped.some((label) => label.includes("flag"))).toBe(false);
+  expect(readSchema({}).violations({}, () => true)).toEqual([]);
+});
+
+test("no two arguments of a call get the same string", () => {
+  const more = { ...values, others: ["b.txt", "c.txt"] };
+  const reader = readSchema({
+    required: [
+      "source",
+      "path",
+      "file",
+      "fourth_file",
+      "destination",
+      "output",
+      "title",
+      "body",
+      "old_text",
+      "new_text",
+    ],
+    properties: Object.fromEntries(
+      [
+        "source",
+        "path",
+        "file",
+        "fourth_file",
+        "destination",
+        "output",
+        "title",
+        "body",
+        "old_text",
+        "new_text",
+      ].map((name) => [name, { type: "string" }]),
+    ),
+  });
+  expect(reader.plain(more)).toEqual({
+    source: "note.txt",
+    path: "b.txt",
+    file: "c.txt",
+    // There are three notes. A fourth path shares one, and proves nothing.
+    fourth_file: "note.txt",
+    destination: "new.txt",
+    output: "new-2.txt",
+    title: "word",
+    body: "word-2",
+    old_text: "word-3",
+    new_text: "word-new",
+  });
+  // An optional argument does not take a value a required one has.
+  const optional = readSchema({
+    required: ["path"],
+    properties: { path: { type: "string" }, backup_file: { type: "string" } },
+  });
+  expect(optional.optional(more)).toEqual([
+    { name: "backup_file", value: "b.txt" },
+  ]);
+});
+
+test("a switch or an option is set to what does least", () => {
+  const reader = readSchema({
+    required: [
+      "dry_run",
+      "no_dry_run",
+      "skip_safety_check",
+      "disable_preview",
+      "force",
+      "keep",
+      "verbose",
+      "action",
+      "mode",
+    ],
+    properties: {
+      dry_run: { type: "boolean" },
+      no_dry_run: { type: "boolean" },
+      skip_safety_check: { type: "boolean" },
+      disable_preview: { type: "boolean" },
+      force: { type: "boolean", default: true },
+      keep: { type: "boolean", default: true },
+      verbose: { type: "boolean" },
+      action: { enum: ["delete_all", "archive", "list"] },
+      mode: { enum: ["purge", "overwrite"] },
+    },
+  });
+  expect(reader.plain(values)).toEqual({
+    dry_run: true,
+    no_dry_run: false,
+    skip_safety_check: false,
+    disable_preview: false,
+    // Left off whatever the schema says its default is.
+    force: false,
+    keep: true,
+    verbose: false,
+    action: "list",
+    // Nothing here only looks, so the first it is.
+    mode: "purge",
+  });
+});
+
+test("a schema too large to fill in is cut short, not followed to the end", () => {
+  const wide = {
+    type: "object",
+    properties: Object.fromEntries(
+      Array.from({ length: 60 }, (_, index) => [`p${index}`, { $ref: "#" }]),
+    ),
+    required: Array.from({ length: 60 }, (_, index) => `p${index}`),
+  };
+  const reader = readSchema(wide);
+  const started = Date.now();
+  reader.plain(values);
+  expect(Date.now() - started).toBeLessThan(2000);
+  expect(reader.truncated()).toBe(true);
+  const small = readSchema({
+    required: ["a"],
+    properties: { a: { type: "string" } },
+  });
+  small.plain(values);
+  expect(small.truncated()).toBe(false);
+  const long = readSchema({
+    required: ["q"],
+    properties: { q: { type: "string", minLength: 600_000_000 } },
+  }).plain(values);
+  expect(String(long.q).length).toBe(4096);
+});
+
+test("a name says whether a tool removes, sends, or spends", () => {
+  for (const name of [
+    "delete_file",
+    "removeAccount",
+    "clear_all",
+    "cleanup",
+    "prune_old",
+    "unlink_file",
+    "rmdir",
+    "deletefile",
+    "empty_trash",
+    "XMLDelete",
+    "DBDrop",
+    "stop_server",
+    "expire_sessions",
+    "send_email",
+    "create_post",
+    "overwrite_config",
+  ]) {
+    expect(soundsDestructive(name), name).toBe(true);
+  }
+  for (const name of [
+    "get_post",
+    "list_orders",
+    "read_email",
+    "search_mail",
+    "add",
+    "write_file",
+    "create_directory",
+    "fetch_page",
+    "checkout_status",
+  ]) {
+    expect(soundsDestructive(name), name).toBe(false);
+  }
 });

@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import {
+  chmodSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -25,9 +26,12 @@ import { track } from "../cleanup.ts";
 import {
   type BaseValues,
   readSchema,
+  type SchemaReader,
   type StringPoint,
+  soundsDestructive,
   withString,
   withValue,
+  words,
 } from "./schema.ts";
 
 export type FindingTier = "safety" | "robustness" | "note";
@@ -70,6 +74,7 @@ export type PlainCall =
   | "refused"
   | "crashed"
   | "hung"
+  | "too large"
   | "not sent";
 
 export type ToolRow = {
@@ -80,11 +85,14 @@ export type ToolRow = {
   readonly reason?: string;
   readonly calls: number;
   readonly plain: PlainCall;
-  // Whether the plain call was seen to work in the scan's own directory.
-  // Paths that leave a directory are sent only to a tool that did.
+  // Whether a plain call was seen to use one of its arguments in the scan's
+  // own directory. Paths that leave a directory are sent only to such an
+  // argument.
   readonly anchored: boolean;
-  // String arguments that got payloads, and how many more there were.
+  // String arguments that got payloads, how many of those also got paths
+  // that leave a directory, and how many more strings there were.
   readonly strings: number;
+  readonly paths: number;
   readonly unreached: number;
   readonly findings: number;
 };
@@ -96,6 +104,9 @@ export type ScanReport = {
   readonly findings: readonly Finding[];
   // Why the scan ended before every tool was called, when it did.
   readonly stopped?: string;
+  // The scan's temp directory, when a call left something in it that could
+  // not be removed.
+  readonly leftover?: string;
 };
 
 export type ScanOptions = {
@@ -105,6 +116,9 @@ export type ScanOptions = {
   // Scan only these tools. Empty means all.
   readonly only: readonly string[];
   readonly skip: readonly string[];
+  // Tools named with --ignore. Like the two above, a name the server does
+  // not have is an error before any call.
+  readonly ignored: readonly string[];
   // Also call tools that are marked, or named, as changing or sending.
   readonly destructive: boolean;
   // Variables the server is started with, on top of PATH and a temp HOME.
@@ -141,15 +155,30 @@ const NESTING_DEPTH = 10_000;
 const MAX_RESTARTS = 3;
 const SETTLE_MS = 150;
 
-// A tool whose name says it removes, sends, or spends. The scan makes up
-// its arguments, so such a tool is not called unless it was asked for. The
-// name is all there is to go on: most servers mark nothing.
-const CHANGES =
-  /(^|[^a-z])(delete|remove|rm|drop|destroy|purge|wipe|erase|truncate|kill|terminate|shutdown|reboot|send|post|publish|deploy|pay|transfer|purchase|buy|email|sms|tweet|merge|push|reset|format|uninstall|revoke|ban|cancel)($|[^a-z])/i;
+// Why a tool is not called unless it was asked for. The scan makes up its
+// arguments, so a tool that removes, sends, or spends is left alone.
+export const HELD = {
+  marked: "the server marks it destructive",
+  unmarked:
+    "the server says it is not read-only, and the default for that is destructive",
+  named: "its name says it removes, sends, or spends",
+} as const;
+
 // A tool that runs what it is given. A command in its argument running is
 // the tool working, not an injection.
-const RUNS_COMMANDS =
-  /(^|[^a-z])(shell|bash|sh|zsh|exec|execute|command|cmd|terminal|eval|repl|script)($|[^a-z])/i;
+const SHELL_NAME =
+  /(^|[^a-z])(shell|bash|sh|zsh|powershell|terminal|repl)($|[^a-z])/i;
+const RUN_NAME =
+  /(^|[^a-z])(run|exec|execute|eval|evaluate|start|spawn)_(command|commands|cmd|script|code|shell|process|program)($|[^a-z])/i;
+const RUN_ALONE = /^(exec|execute|eval|evaluate|cmd|command)$/i;
+// "Run a shell command", "Executes the given script". Not "Runs the git log
+// command for one file": that tool runs one command of its own.
+const RUN_DESCRIPTION =
+  /\b(run|runs|execute|executes|evaluate|evaluates)\s+(a|an|any|arbitrary|the given|given|shell|bash|python|javascript)\b[^.]{0,30}\b(command|commands|script|code)\b/i;
+// A result that reads as a refusal. Some servers turn a bad call down in
+// plain text, with no isError.
+const REFUSAL =
+  /^\W*(error|invalid|failed|failure|exception|bad request|validation|missing|unknown|cannot|could not|unable)\b|\b(is required|are required|must be|expected|invalid (type|argument|arguments|input|params?|parameters?)|validation (error|failed))\b/i;
 
 type Probe = {
   // What the payload is, for the report.
@@ -163,6 +192,18 @@ type Probe = {
   readonly shown?: string;
   // The marker file this payload tries to create.
   readonly marker?: string;
+  // The payload names a place outside the server's directory.
+  readonly outside?: boolean;
+  // The name of a file it tries to create there.
+  readonly creates?: string;
+};
+
+// The call a finding is put down to.
+type Owner = {
+  readonly tool: string;
+  readonly argument: string | undefined;
+  readonly what: string;
+  readonly call: string;
 };
 
 type Outcome = {
@@ -197,19 +238,21 @@ type Canaries = {
   readonly secretFile: string;
   readonly deepFile: string;
   readonly secretText: string;
-  // The text of the note in the workspace, and the name of a second file
-  // there. A reply that holds either shows the tool works in the workspace.
-  // Whether a reply shows the tool working in the scan's directory.
-  seenIn(text: string): boolean;
+  // Which of the strings a call was given the call was seen to use in the
+  // workspace: the reply holds what only the file it names holds, or what
+  // it names changed or appeared.
+  used(sent: readonly string[], reply: string): Set<string>;
   // Files beside the workspace whose names only a listing shows.
   readonly unlisted: readonly string[];
   marker(id: string): string;
   // Remembers what the server itself put in its directory at start.
   adopt(): void;
-  // Whether the workspace is other than the scan left it.
-  touched(): boolean;
   // Puts back what a call changed outside, and says what that was.
-  restore(): { wroteOutside: string | undefined; markers: string[] };
+  restore(): {
+    damaged: string | undefined;
+    created: string[];
+    markers: string[];
+  };
   // Empties the workspace of what earlier calls left in it.
   clear(): void;
 };
@@ -224,7 +267,7 @@ type Canaries = {
 export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
   const canaries = plant();
   const untrack = track(() => {
-    rmSync(canaries.top, { recursive: true, force: true, maxRetries: 3 });
+    removeTree(canaries.top);
   });
   let loopback: Loopback | undefined;
   let session: McpSession | undefined;
@@ -232,10 +275,12 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
   let down: string | undefined;
   const findings: Finding[] = [];
   const rows: ToolRow[] = [];
-  const owners = new Map<
-    string,
-    { tool: string; argument: string | undefined; what: string; call: string }
-  >();
+  // The call that carried each name a payload tries to create.
+  const owners = new Map<string, Owner>();
+  // The last call that named a place outside the server's directory.
+  let lastOutside: Owner | undefined;
+  // Tools that gave a reply too large to read.
+  const tooLarge = new Set<string>();
   let softErrors = false;
   let markers = 0;
   let values = canaries.values;
@@ -320,24 +365,48 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
     }
   };
 
-  // What the planted files show, attributed to the payload that names each
-  // marker and not to whichever call happened to be running.
-  const collect = (
-    tool: string,
-    argument: string | undefined,
-    what: string,
-    call: string,
-  ): void => {
+  // What the planted files show. A file a payload names is put down to the
+  // call that carried the name, however late it appeared. A change that
+  // carries no name is put down to the call that just ran if that call
+  // named a place outside, and otherwise to the last one that did.
+  const collect = (current: Owner, named: boolean): void => {
     const left = canaries.restore();
-    if (left.wroteOutside !== undefined) {
+    const blame = (what: string): void => {
+      if (named || lastOutside === undefined) {
+        add(
+          "outside-write",
+          current.tool,
+          current.argument,
+          `${what}, with ${current.what}.`,
+          current.call,
+        );
+        return;
+      }
       add(
         "outside-write",
-        tool,
-        argument,
-        `${left.wroteOutside}, with ${what}.`,
-        call,
+        lastOutside.tool,
+        lastOutside.argument,
+        `${what}. It was noticed after a later call, and is put down to the last call that named a place outside: ${lastOutside.what}.`,
+        lastOutside.call,
+      );
+    };
+    for (const name of left.created) {
+      const owner =
+        owners.get(name) ??
+        [...owners].find(([key]) => name.startsWith(key))?.[1];
+      if (owner === undefined) {
+        blame(`A file appeared outside the server's directory (${name})`);
+        continue;
+      }
+      add(
+        "outside-write",
+        owner.tool,
+        owner.argument,
+        `A file appeared outside the server's directory (${name}), with ${owner.what}.`,
+        owner.call,
       );
     }
+    if (left.damaged !== undefined) blame(left.damaged);
     for (const name of left.markers) {
       const owner = owners.get(name);
       if (!owner) continue;
@@ -358,12 +427,15 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
     probe: Probe | undefined,
     printed: string,
     outcome: Outcome,
-  ): void => {
+  ): string => {
     const call = `{"name":${JSON.stringify(tool)},"arguments":${shorten(printed)}}`;
     const what = probe === undefined ? "a plain call" : probe.what;
+    const owner: Owner = { tool, argument, what, call };
     if (probe?.marker !== undefined) {
-      owners.set(path.basename(probe.marker), { tool, argument, what, call });
+      owners.set(path.basename(probe.marker), owner);
     }
+    if (probe?.creates !== undefined) owners.set(probe.creates, owner);
+    if (probe?.outside === true) lastOutside = owner;
     if (outcome.status === "crash") {
       add(
         "crash",
@@ -381,13 +453,9 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
         call,
       );
     } else if (outcome.status === "oversize") {
-      add(
-        "bad-reply",
-        tool,
-        argument,
-        `The reply to ${what} was too large to read, and the scan stopped the server: ${outcome.text}`,
-        call,
-      );
+      // A large reply is not a fault: a screenshot is one. The scan cannot
+      // read it, and the row says so.
+      tooLarge.add(tool);
     } else if (outcome.status === "bad-reply") {
       add(
         "bad-reply",
@@ -433,7 +501,7 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
         call,
       );
     }
-    collect(tool, argument, what, call);
+    collect(owner, probe?.outside === true);
     if (
       loopback?.take() === true &&
       probe !== undefined &&
@@ -447,9 +515,10 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
         call,
       );
     }
+    return call;
   };
 
-  try {
+  const run = async (): Promise<ScanReport> => {
     loopback = await listen();
     // A plain call to a tool that takes an address fetches this one.
     const okUrl = loopback.url("ok");
@@ -468,12 +537,26 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
         `the MCP server has no tool named ${unknown.join(", ")}. Its tools: ${listed.join(", ")}`,
       );
     }
+    const [stray] = options.ignored.filter((name) => !listed.includes(name));
+    if (stray !== undefined) {
+      throw new ScanUsageError(
+        `--ignore names ${stray}, which is not a tool of this server. Its tools: ${listed.join(", ")}`,
+      );
+    }
     const server = session.serverInfo;
     if (options.planOnly) {
       for (const tool of session.toolList) {
-        const reason = skipReason(tool, options);
-        const reader = readSchema(tool.inputSchema);
-        const { points, skipped } = reader.points(reader.plain(values));
+        let reason = skipReason(tool, options);
+        let strings = 0;
+        let unreached = 0;
+        try {
+          const reader = readSchema(tool.inputSchema);
+          const { points, skipped } = reader.points(reader.plain(values));
+          strings = points.length;
+          unreached = skipped;
+        } catch {
+          reason ??= UNREADABLE;
+        }
         rows.push({
           name: tool.name,
           status: reason === undefined ? "planned" : "skipped",
@@ -481,8 +564,9 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
           calls: 0,
           plain: "not sent",
           anchored: false,
-          strings: points.length,
-          unreached: skipped,
+          strings,
+          paths: 0,
+          unreached,
           findings: 0,
         });
       }
@@ -492,7 +576,10 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
     // Names that are on every object, and one that is on none.
     const answered: string[] = [];
     const nowhere = `gauntlet-no-such-tool-${token(4)}`;
-    for (const name of [nowhere, ...NOT_TOOLS]) {
+    // A server may really have a tool called toString. Only names it does
+    // not list are tried.
+    const absent = NOT_TOOLS.filter((name) => !listed.includes(name));
+    for (const name of [nowhere, ...absent]) {
       const call = `{"name":${JSON.stringify(name)},"arguments":{}}`;
       const outcome = await send(name, "{}");
       if (outcome.status === "result") answered.push(name);
@@ -513,7 +600,15 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
           call,
         );
       }
-      collect(name, undefined, "a call to a tool it does not list", call);
+      collect(
+        {
+          tool: name,
+          argument: undefined,
+          what: "a call to a tool it does not list",
+          call,
+        },
+        false,
+      );
       loopback.take();
     }
     if (answered.includes(nowhere)) {
@@ -544,10 +639,13 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
     // What a tool started and left running may still write.
     await settle(SETTLE_MS * 2);
     collect(
-      "(after the scan)",
-      undefined,
-      "something a call left running",
-      "{}",
+      {
+        tool: "(after the scan)",
+        argument: undefined,
+        what: "no call in particular: it was noticed after every tool had answered",
+        call: "{}",
+      },
+      false,
     );
     return {
       name: options.name,
@@ -556,15 +654,23 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
       findings,
       ...(down === undefined ? {} : { stopped: down }),
     };
+  };
+
+  let report: ScanReport;
+  let removed = true;
+  try {
+    report = await run();
   } finally {
     await session?.stop();
     await loopback?.close();
     untrack();
-    rmSync(canaries.top, { recursive: true, force: true, maxRetries: 3 });
+    // After the report is made. A file a call left that cannot be removed
+    // does not cost the user the report.
+    removed = removeTree(canaries.top);
   }
+  return removed ? report : { ...report, leftover: canaries.top };
 
   async function scanTool(tool: McpTool): Promise<ToolRow> {
-    const reader = readSchema(tool.inputSchema);
     const row = (
       status: ToolRow["status"],
       rest: Partial<ToolRow>,
@@ -575,6 +681,7 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
       plain: "not sent",
       anchored: false,
       strings: 0,
+      paths: 0,
       unreached: 0,
       findings: 0,
       ...rest,
@@ -582,18 +689,59 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
     const skipped = skipReason(tool, options);
     if (skipped !== undefined) return row("skipped", { reason: skipped });
     if (down !== undefined) return row("skipped", { reason: down });
+    let reader: SchemaReader;
+    let cut = false;
+    try {
+      reader = readSchema(tool.inputSchema);
+      reader.plain(values);
+      cut = reader.truncated();
+    } catch {
+      return row("skipped", { reason: UNREADABLE });
+    }
 
     const before = findings.length;
     const runsCommands = isCommandTool(tool);
+    const readOnly = tool.annotations?.readOnlyHint === true;
     let calls = 0;
     let restarts = 0;
     let stopped: string | undefined;
+    let lastCall = `{"name":${JSON.stringify(tool.name)},"arguments":{}}`;
+    // The arguments of a call that the call was seen to use in the scan's
+    // own directory: the reply holds what only the file it names holds, or
+    // what it names changed or appeared. Every argument has a value no other
+    // has. One that shares its value with another proves nothing, and is
+    // left out.
+    const seen = (
+      args: Record<string, unknown>,
+      outcome: Outcome,
+    ): Set<string> => {
+      const labels = new Set<string>();
+      if (outcome.status !== "result") return labels;
+      const { points } = reader.points(args);
+      const given = points.map((point) => valueAt(args, point.pointer));
+      const strings = given.filter(
+        (item): item is string => typeof item === "string",
+      );
+      const used = canaries.used(strings, outcome.text);
+      points.forEach((point, index) => {
+        const value = given[index];
+        if (
+          typeof value === "string" &&
+          used.has(value) &&
+          strings.filter((item) => item === value).length === 1
+        ) {
+          labels.add(point.label);
+        }
+      });
+      return labels;
+    };
+
     // One call: send it, then look at everything it could have left.
     const call = async (
       argument: string | undefined,
       probe: Probe | undefined,
       args: Record<string, unknown>,
-    ): Promise<{ outcome: Outcome; touched: boolean } | undefined> => {
+    ): Promise<{ outcome: Outcome; labels: Set<string> } | undefined> => {
       if (stopped !== undefined) return undefined;
       if (down !== undefined) {
         stopped = down;
@@ -611,7 +759,6 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
           ? text
           : text.replace(placeholder, () => probe.raw ?? "null");
       const outcome = await send(tool.name, argumentsJson);
-      const touched = canaries.touched();
       // The report prints a short stand-in for a value nobody would read.
       const printed =
         probe?.shown === undefined
@@ -622,7 +769,11 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
                 : placeholder,
               () => probe.shown ?? "",
             );
-      judge(tool.name, argument, probe, printed, outcome);
+      // Before anything is put back: what a plain call changed is how the
+      // scan knows which argument it used here.
+      const labels =
+        probe === undefined ? seen(args, outcome) : new Set<string>();
+      lastCall = judge(tool.name, argument, probe, printed, outcome);
       if (
         outcome.status === "crash" ||
         outcome.status === "hang" ||
@@ -633,29 +784,30 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
           stopped = `stopped after the server went down ${MAX_RESTARTS} times`;
         }
       }
-      return { outcome, touched };
+      return { outcome, labels };
     };
 
     // A plain call first. A tool may want its path to be a file, a
     // directory, or a name that is not there yet, relative or in full, and
-    // the schema rarely says which. Each form is tried until the tool is
-    // seen to work in the scan's own directory: it returned the text of the
-    // note there, named a file only a listing shows, or changed something.
-    // Only then are paths that leave a directory sent to it. A tool that
-    // keeps its data somewhere else would resolve those against that place,
-    // and the scan could not see what they did there.
+    // the schema rarely says which. Each form is tried until an argument is
+    // seen to be used in the scan's own directory. Only such an argument is
+    // sent a path that leaves a directory. A tool that keeps its data
+    // somewhere else would resolve that path against that place, and the
+    // scan could not see what it did there.
+    const one = { others: [] as string[] };
     const bases: readonly BaseValues[] = [
       values,
-      { ...values, path: values.dir },
-      { ...values, path: values.fresh },
+      { ...values, ...one, path: values.dir },
+      { ...values, ...one, path: values.fresh },
+      { ...values, fresh: values.path },
       absolute,
-      { ...absolute, path: absolute.dir },
-      { ...absolute, path: absolute.fresh },
+      { ...absolute, ...one, path: absolute.dir },
+      { ...absolute, ...one, path: absolute.fresh },
     ];
     let base = values;
     let plain = reader.plain(base);
     let first: Outcome | undefined;
-    let anchored = false;
+    let anchors = new Set<string>();
     const tried = new Set<string>();
     for (const candidate of bases) {
       const args = reader.plain(candidate);
@@ -664,57 +816,88 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
       tried.add(key);
       // Each tool, and each try, starts from the same directory.
       canaries.clear();
-      const next = await call(undefined, undefined, args);
-      if (next === undefined) break;
-      const { outcome } = next;
-      const worked =
-        outcome.status === "result" &&
-        (next.touched || canaries.seenIn(outcome.text));
+      const sent = await call(undefined, undefined, args);
+      if (sent === undefined) break;
+      const { outcome, labels } = sent;
       if (
         first === undefined ||
-        worked ||
+        labels.size > 0 ||
         (first.status !== "result" && outcome.status === "result")
       ) {
         first = outcome;
         base = candidate;
         plain = args;
+        anchors = labels;
       }
-      if (worked) {
-        anchored = true;
-        break;
-      }
-      // A server that went down is not asked the same thing five more ways.
+      if (labels.size > 0) break;
+      // A server that went down is not asked the same thing six more ways.
       if (outcome.status !== "error" && outcome.status !== "result") break;
     }
     const status = first?.status;
     const plainCall: PlainCall =
       status === "result"
         ? "answered"
-        : status === "crash" || status === "oversize"
+        : status === "crash"
           ? "crashed"
-          : status === "hang"
-            ? "hung"
-            : status === undefined
-              ? "not sent"
-              : "refused";
+          : status === "oversize"
+            ? "too large"
+            : status === "hang"
+              ? "hung"
+              : status === undefined
+                ? "not sent"
+                : "refused";
 
-    const targets: { args: Record<string, unknown>; point: StringPoint }[] = [];
-    let unreached = 0;
-    const gather = (args: Record<string, unknown>, only?: string): void => {
-      const { points, skipped } = reader.points(args);
-      for (const point of points) {
-        if (only === undefined || point.pointer[0] === only) {
-          targets.push({ args, point });
-        }
-      }
-      if (only === undefined) unreached += skipped;
+    type Target = {
+      args: Record<string, unknown>;
+      point: StringPoint;
+      anchored: boolean;
     };
-    gather(plain);
-    for (const extra of reader.optional(base)) {
-      gather(withValue(plain, extra.name, extra.value), extra.name);
+    const targets: Target[] = [];
+    const required = reader.points(plain);
+    const unreached = required.skipped;
+    for (const point of required.points) {
+      targets.push({ args: plain, point, anchored: anchors.has(point.label) });
     }
-    const inFull = path.isAbsolute(base.path);
-    for (const { args, point } of targets) {
+    // An optional argument is added to the plain call and tried the same
+    // way, so it is judged on a call that had it.
+    for (const { name } of reader.optional(base)) {
+      let chosen:
+        | { args: Record<string, unknown>; labels: Set<string> }
+        | undefined;
+      const sent = new Set<string>();
+      for (const candidate of [base, ...bases]) {
+        const extra = reader
+          .optional(candidate)
+          .find((item) => item.name === name);
+        if (extra === undefined) continue;
+        const args = withValue(plain, name, extra.value);
+        const key = JSON.stringify(args);
+        if (sent.has(key)) continue;
+        sent.add(key);
+        canaries.clear();
+        const made = await call(undefined, undefined, args);
+        const outcome = made?.outcome;
+        const labels = made?.labels ?? new Set<string>();
+        const mine = reader
+          .points(args)
+          .points.filter((point) => point.pointer[0] === name);
+        const hit = mine.some((point) => labels.has(point.label));
+        if (chosen === undefined || hit) chosen = { args, labels };
+        if (hit || outcome === undefined) break;
+        if (outcome.status !== "error" && outcome.status !== "result") break;
+      }
+      if (chosen === undefined) continue;
+      for (const point of reader.points(chosen.args).points) {
+        if (point.pointer[0] !== name) continue;
+        targets.push({
+          args: chosen.args,
+          point,
+          anchored: chosen.labels.has(point.label),
+        });
+      }
+    }
+
+    for (const { args, point, anchored } of targets) {
       const current = valueAt(args, point.pointer);
       const probes = probesFor({
         point,
@@ -722,8 +905,9 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
         canaries,
         loopback,
         withPaths: anchored,
-        withShell: !runsCommands,
-        inFull,
+        // An argument that is a command is meant to be run.
+        withShell: !runsCommands && point.kind !== "command",
+        inFull: typeof current === "string" && path.isAbsolute(current),
         nextMarker: () => {
           markers += 1;
           return canaries.marker(`${markers}-${token(3)}`);
@@ -741,18 +925,37 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
     if (!softErrors && status === "result") {
       const accepted: string[] = [];
       let example = "";
-      // A missing argument can turn into a name, "undefined" for one. That
-      // is sent only where the scan would see it land: to a tool seen to
-      // work with a short path in the scan's directory, or one that takes
-      // no string at all.
-      const withMissing = (anchored && !inFull) || targets.length === 0;
-      for (const violation of reader.violations(plain, withMissing)) {
+      // A missing argument is what a tool is most likely to read as "all of
+      // them", or to turn into a name. One is left out only of a tool the
+      // server marks read-only, or where the scan would see the name land:
+      // an argument seen to name a file in the scan's directory.
+      const canDrop = (name: string): boolean => {
+        if (readOnly) return true;
+        const target = targets.find(
+          (item) =>
+            item.args === plain &&
+            item.point.pointer.length === 1 &&
+            item.point.pointer[0] === name,
+        );
+        const current = valueAt(plain, [name]);
+        return (
+          target?.anchored === true &&
+          typeof current === "string" &&
+          !path.isAbsolute(current)
+        );
+      };
+      for (const violation of reader.violations(plain, canDrop)) {
         const sent = await call(
           undefined,
           { what: violation.label, value: null },
           violation.arguments,
         );
-        if (sent?.outcome.status === "result") {
+        // A result that says "Error: a must be a number" is the server
+        // turning the call down in its own way.
+        if (
+          sent?.outcome.status === "result" &&
+          !REFUSAL.test(sent.outcome.text)
+        ) {
           accepted.push(violation.label);
           if (example.length === 0)
             example = JSON.stringify(violation.arguments);
@@ -772,21 +975,59 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
     }
     // What this tool started may finish a moment after it answered.
     await settle(SETTLE_MS);
-    collect(tool.name, undefined, "something a call left running", "{}");
+    collect(
+      {
+        tool: tool.name,
+        argument: undefined,
+        what: "no call in particular: it was noticed after this tool's calls were answered, and the call below is the last one sent",
+        call: lastCall,
+      },
+      false,
+    );
 
+    const named = (items: readonly Target[]): string => {
+      const labels = [...new Set(items.map((item) => item.point.label))];
+      const shown = labels.slice(0, 4).join(", ");
+      return labels.length > 4
+        ? `${shown}, and ${labels.length - 4} more`
+        : shown;
+    };
+    const anchored = targets.some((item) => item.anchored);
     const reasons: string[] = [];
     if (stopped !== undefined) reasons.push(stopped);
-    if (!reader.described)
-      reasons.push("it publishes no arguments, so only a plain call was made");
-    else if (
-      !anchored &&
-      plainCall === "answered" &&
-      targets.some(({ point }) => point.kind === "path")
-    ) {
-      // Said only where it matters: the tool takes a path.
+    if (cut) {
+      reasons.push("its schema asks for more values than a scan fills in");
+    }
+    if (tooLarge.has(tool.name)) {
       reasons.push(
-        "paths that leave a directory were not sent: the plain call was not seen to work in the scan's directory",
+        "a reply was too large to read, and the server was started again",
       );
+    }
+    if (!reader.described) {
+      reasons.push("it publishes no arguments, so only a plain call was made");
+    } else if (plainCall === "answered") {
+      // Said for an argument that looks like a path. For any other string
+      // the paths column has the count.
+      const left = targets.filter(
+        (item) => !item.anchored && item.point.kind === "path",
+      );
+      if (left.length > 0) {
+        reasons.push(
+          `no path that leaves a directory was sent to ${named(left)}: not seen to name a file in the scan's directory`,
+        );
+      }
+    }
+    if (targets.length > 0 && runsCommands) {
+      reasons.push(
+        "no command was put in its arguments: the tool runs commands by design",
+      );
+    } else {
+      const commands = targets.filter((item) => item.point.kind === "command");
+      if (commands.length > 0) {
+        reasons.push(
+          `no command was added to ${named(commands)}: it takes a command`,
+        );
+      }
     }
     if (unreached > 0)
       reasons.push(`${unreached} more string arguments were not reached`);
@@ -796,11 +1037,14 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
       plain: plainCall,
       anchored,
       strings: targets.length,
+      paths: targets.filter((item) => item.anchored).length,
       unreached,
       findings: findings.slice(before).length,
     });
   }
 }
+
+const UNREADABLE = "its schema could not be read";
 
 // Why a tool is left alone, or undefined when it is called.
 function skipReason(tool: McpTool, options: ScanOptions): string | undefined {
@@ -811,23 +1055,51 @@ function skipReason(tool: McpTool, options: ScanOptions): string | undefined {
   // Named with --tool: the user asked for this one.
   if (options.destructive || options.only.includes(tool.name)) return undefined;
   const marks = tool.annotations ?? {};
+  if (marks.destructiveHint === true) return HELD.marked;
   if (marks.readOnlyHint === true) return undefined;
-  if (marks.destructiveHint === true) return "the server marks it destructive";
   if (marks.destructiveHint === false) return undefined;
-  const spaced = tool.name.replace(/([a-z])([A-Z])/g, "$1_$2");
-  if (CHANGES.test(spaced)) {
-    return "its name says it removes, sends, or spends";
-  }
-  return undefined;
+  // The protocol's default for a tool that is not read-only is destructive.
+  if (marks.readOnlyHint === false) return HELD.unmarked;
+  return soundsDestructive(tool.name) ? HELD.named : undefined;
 }
 
 function isCommandTool(tool: McpTool): boolean {
-  const spaced = tool.name.replace(/([a-z])([A-Z])/g, "$1_$2");
-  if (RUNS_COMMANDS.test(spaced)) return true;
-  const description = tool.description ?? "";
-  return /\b(run|runs|execute|executes|executing|evaluate|evaluates)\b[^.]{0,40}\b(command|commands|shell|script|code)\b/i.test(
-    description,
+  const spaced = words(tool.name);
+  return (
+    SHELL_NAME.test(spaced) ||
+    RUN_NAME.test(spaced) ||
+    RUN_ALONE.test(spaced) ||
+    RUN_DESCRIPTION.test(tool.description ?? "")
   );
+}
+
+// Removes a directory and what is in it. A call can leave a directory that
+// cannot be written, as a package cache does. When removing fails, the
+// directories are made writable and it is tried once more.
+function removeTree(target: string): boolean {
+  for (const attempt of [0, 1]) {
+    try {
+      rmSync(target, { recursive: true, force: true, maxRetries: 2 });
+      return true;
+    } catch {
+      if (attempt === 0) unlock(target, 0);
+    }
+  }
+  return false;
+}
+
+function unlock(target: string, depth: number): void {
+  if (depth > 64) return;
+  try {
+    // A symlink is not followed: what it points at is not the scan's.
+    if (!lstatSync(target).isDirectory()) return;
+    chmodSync(target, 0o700);
+    for (const name of readdirSync(target)) {
+      unlock(path.join(target, name), depth + 1);
+    }
+  } catch {
+    // What cannot be opened up is left, and the report says so.
+  }
 }
 
 function probesFor(given: {
@@ -870,14 +1142,17 @@ function probesFor(given: {
     {
       what: `${NESTING_DEPTH} nested arrays where a string goes`,
       value: null,
-      raw: `${"[".repeat(NESTING_DEPTH)}${"]".repeat(NESTING_DEPTH)}`,
+      // Not empty at the centre. A server that turns the arrays into a
+      // string gets this word, and not an empty string, for a name.
+      raw: `${"[".repeat(NESTING_DEPTH)}${JSON.stringify(canaries.values.text)}${"]".repeat(NESTING_DEPTH)}`,
       shown: `"[[[[... ${NESTING_DEPTH} arrays deep"`,
     },
   ];
   if (given.withPaths) {
     // Every one of these names a place the scan made. None is empty, and
     // none goes further up than the scan's own directories reach.
-    const relative: [string, string][] = [
+    const created = `gauntlet-created-${token(3)}.txt`;
+    const relative: [string, string, string?][] = [
       ["a path that starts with ../", `../${secretName}`],
       [
         "a path that goes down and back up",
@@ -890,30 +1165,32 @@ function probesFor(given: {
       ],
       ["the parent directory", ".."],
       ["a symlinked directory", canaries.linkDir],
-      ["a new file one level up", `../gauntlet-created-${token(3)}.txt`],
+      ["a new file one level up", `../${created}`, created],
     ];
-    for (const [what, value] of relative) {
-      // A tool that was seen to work only with a path in full is given the
-      // same path in full, still with its .. or its symlink in it. It is
+    for (const [what, value, creates] of relative) {
+      // An argument that was seen to work only with a path in full is given
+      // the same path in full, still with its .. or its symlink in it. It is
       // not given the short form: where it would resolve that was not seen.
-      probes.push(
-        given.inFull
-          ? {
-              what: `${what}, written in full`,
-              value: `${canaries.workspace}/${value}`,
-            }
-          : { what, value },
-      );
+      probes.push({
+        what: given.inFull ? `${what}, written in full` : what,
+        value: given.inFull ? `${canaries.workspace}/${value}` : value,
+        outside: true,
+        ...(creates === undefined ? {} : { creates }),
+      });
     }
+    const made = `gauntlet-created-${token(3)}.txt`;
     probes.push(
-      { what: "an absolute path", value: canaries.secretFile },
+      { what: "an absolute path", value: canaries.secretFile, outside: true },
       {
         what: "the absolute path of the parent directory",
         value: canaries.root,
+        outside: true,
       },
       {
         what: "a new file at an absolute path outside",
-        value: path.join(canaries.root, `gauntlet-created-${token(3)}.txt`),
+        value: path.join(canaries.root, made),
+        outside: true,
+        creates: made,
       },
     );
   }
@@ -945,6 +1222,7 @@ function probesFor(given: {
         what: "a file:// address",
         value: `file://${canaries.secretFile}`,
         viaUrl: true,
+        outside: true,
       },
       {
         what: "an address on this machine",
@@ -982,29 +1260,45 @@ function plant(): Canaries {
   const secretFile = path.join(root, `gauntlet-${id}-outside.txt`);
   const deepFile = path.join(outsideDir, `gauntlet-${id}-deep.txt`);
   const secretText = `gauntlet-secret-${token(12)}`;
-  const noteText = `gauntlet-note-${token(12)}`;
   const unlisted = [
     `gauntlet-unlisted-${token(8)}.txt`,
     `gauntlet-unlisted-${token(8)}.txt`,
   ];
   const [unlistedRoot = "", unlistedDeep = ""] = unlisted;
-  const note = `gauntlet-${id}-note.txt`;
   const dir = `gauntlet-${id}-dir`;
-  const fresh = `gauntlet-${id}-new.txt`;
+  const fresh = `gauntlet-${id}-made.txt`;
   const linkOut = `gauntlet-${id}-link-out`;
   const linkDir = `gauntlet-${id}-link-dir`;
   const text = `gauntlet-${id}`;
-  // Two names that are never sent. Each starts with the word a plain call
-  // searches for, so a search by name finds them.
-  const hereName = `${text}-here-${token(8)}.txt`;
+  // Three notes, one for each of the first three path arguments of a call.
+  // Each holds a mark that is never sent, so a reply with a mark in it read
+  // that note, and the argument that named the note is the one that did it.
+  // Each also holds the word a plain call searches for or replaces, so a
+  // tool that looks inside files finds something.
+  const makeNote = (
+    name: string,
+  ): { name: string; mark: string; body: string } => {
+    const mark = `gauntlet-note-${token(12)}`;
+    return {
+      name: `gauntlet-${id}-${name}.txt`,
+      mark,
+      body: `${text} ${mark}\n`,
+    };
+  };
+  const note = makeNote("note");
+  const notes = [note, makeNote("note-b"), makeNote("note-c")];
+  // In the directory, and never sent. It starts with the word a plain call
+  // searches for, so a search by name finds it.
   const innerName = `${text}-inner-${token(8)}.txt`;
-  // The note holds the word a plain call searches for or replaces, so a
-  // tool that looks inside files finds something in it.
-  const noteBody = `${text} ${noteText}\n`;
-  // So do the files outside, so a tool that searches or replaces finds
-  // something in them too, if it gets that far.
+  // The files outside hold the word too, so a tool that searches or replaces
+  // finds something in them, if it gets that far.
   const secretBody = `${text} ${secretText}\n`;
-  const fixtures = new Set([note, dir, hereName, linkOut, linkDir]);
+  const fixtures = new Set([
+    ...notes.map((item) => item.name),
+    dir,
+    linkOut,
+    linkDir,
+  ]);
   const adopted = new Set<string>();
   const stuck = new Set<string>();
   const here = (name: string): string => path.join(workspace, name);
@@ -1017,7 +1311,7 @@ function plant(): Canaries {
       current = undefined;
     }
     if (current === body) return;
-    rmSync(file, { recursive: true, force: true });
+    removeTree(file);
     writeFileSync(file, body);
   };
   // Everything the scan planted, put back if a call removed or changed it.
@@ -1030,20 +1324,18 @@ function plant(): Canaries {
     write(deepFile, secretBody);
     write(path.join(root, unlistedRoot), "gauntlet\n");
     write(path.join(outsideDir, unlistedDeep), "gauntlet\n");
-    write(here(note), noteBody);
-    write(here(hereName), "gauntlet\n");
+    for (const item of notes) write(here(item.name), item.body);
+    for (const name of list(here(dir))) {
+      if (name !== innerName) remove(path.join(here(dir), name));
+    }
     write(path.join(here(dir), innerName), "gauntlet\n");
     link(secretFile, here(linkOut));
     link(outsideDir, here(linkDir));
   };
   const remove = (target: string): void => {
-    try {
-      rmSync(target, { recursive: true, force: true, maxRetries: 2 });
-    } catch {
-      // A call left something that cannot be removed. It is not reported
-      // again on every later call.
-      stuck.add(target);
-    }
+    // A call left something that cannot be removed. It is not reported
+    // again on every later call.
+    if (!removeTree(target)) stuck.add(target);
   };
   const read = (file: string): string | undefined => {
     try {
@@ -1059,9 +1351,23 @@ function plant(): Canaries {
       return [];
     }
   };
+  const exists = (file: string): boolean => {
+    try {
+      return lstatSync(file, { throwIfNoEntry: false }) !== undefined;
+    } catch {
+      return false;
+    }
+  };
   replant();
 
-  const values: BaseValues = { path: note, dir, fresh, url: "", text };
+  const values: BaseValues = {
+    path: note.name,
+    dir,
+    fresh,
+    url: "",
+    text,
+    others: notes.slice(1).map((item) => item.name),
+  };
   return {
     top,
     root,
@@ -1070,20 +1376,78 @@ function plant(): Canaries {
     values,
     absolute: {
       ...values,
-      path: here(note),
+      path: here(note.name),
       dir: here(dir),
       fresh: here(fresh),
+      others: notes.slice(1).map((item) => here(item.name)),
     },
     linkOut,
     linkDir,
     secretFile,
     deepFile,
     secretText,
-    // None of the three is ever sent, so a reply that has one read it here.
-    seenIn: (reply) =>
-      holds(reply, noteText) ||
-      reply.includes(hereName) ||
-      reply.includes(innerName),
+    used(sent, reply) {
+      const names = list(workspace);
+      const added = names.filter(
+        (name) => !fixtures.has(name) && !adopted.has(name),
+      );
+      // What is new here may hold what a call read: a copy of a note.
+      const copies = added.map((name) => read(here(name)) ?? "");
+      const found = new Set<string>();
+      for (const value of sent) {
+        if (value.length === 0 || value.length > 4096 || value.includes("\0")) {
+          continue;
+        }
+        const full = path.resolve(workspace, value);
+        const inside = path.relative(workspace, full);
+        if (
+          inside === "" ||
+          inside.startsWith("..") ||
+          path.isAbsolute(inside)
+        ) {
+          continue;
+        }
+        const named = notes.find((item) => item.name === inside);
+        if (named !== undefined) {
+          if (
+            holds(reply, named.mark) ||
+            read(here(named.name)) !== named.body ||
+            copies.some((copy) => copy.includes(named.mark))
+          ) {
+            found.add(value);
+          }
+          continue;
+        }
+        if (inside === dir) {
+          const within = list(here(dir));
+          if (
+            reply.includes(innerName) ||
+            within.length !== 1 ||
+            within[0] !== innerName
+          ) {
+            found.add(value);
+          }
+          continue;
+        }
+        const [first = ""] = inside.split(path.sep);
+        if (first === linkOut || first === linkDir) continue;
+        // A name that was not there is there now, as it is or with an
+        // extension the tool added. A file the server made for itself, a
+        // log or a cache, has neither name.
+        if (exists(full)) found.add(value);
+        else if (
+          !inside.includes(path.sep) &&
+          added.some(
+            (name) =>
+              name.startsWith(inside) &&
+              /^\.[A-Za-z0-9]{1,8}$/.test(name.slice(inside.length)),
+          )
+        ) {
+          found.add(value);
+        }
+      }
+      return found;
+    },
     unlisted,
     marker: (name) => path.join(root, `gauntlet-marker-${name}`),
     adopt() {
@@ -1091,21 +1455,14 @@ function plant(): Canaries {
         if (!fixtures.has(name)) adopted.add(name);
       }
     },
-    touched() {
-      if (read(here(note)) !== noteBody) return true;
-      const names = list(workspace);
-      return (
-        names.some((name) => !fixtures.has(name) && !adopted.has(name)) ||
-        [...fixtures].some((name) => !names.includes(name))
-      );
-    },
     restore() {
-      let wroteOutside: string | undefined;
+      let damaged: string | undefined;
+      const created: string[] = [];
       const markers: string[] = [];
       for (const file of [secretFile, deepFile]) {
         const now = read(file);
         if (now === secretBody) continue;
-        wroteOutside ??=
+        damaged ??=
           now === undefined
             ? "A file outside the server's directory was deleted"
             : "A file outside the server's directory was overwritten";
@@ -1122,8 +1479,7 @@ function plant(): Canaries {
         const target = path.join(root, name);
         if (stuck.has(target)) continue;
         if (name.startsWith("gauntlet-marker-")) markers.push(name);
-        else
-          wroteOutside ??= `A file appeared outside the server's directory (${name})`;
+        else created.push(name);
         remove(target);
       }
       const deep = new Set([path.basename(deepFile), unlistedDeep]);
@@ -1131,7 +1487,7 @@ function plant(): Canaries {
         if (deep.has(name)) continue;
         const target = path.join(outsideDir, name);
         if (stuck.has(target)) continue;
-        wroteOutside ??= `A file appeared outside the server's directory (${name})`;
+        created.push(name);
         remove(target);
       }
       try {
@@ -1139,7 +1495,7 @@ function plant(): Canaries {
       } catch {
         // What could not be put back shows as a change on the next call.
       }
-      return { wroteOutside, markers };
+      return { damaged, created, markers };
     },
     clear() {
       for (const name of list(workspace)) {
