@@ -4,15 +4,31 @@ Gauntlet feeds adversarial tool-call payloads to an adapter and prints pass, fai
 
 ## What it is for
 
-A model sends a tool call. Code you wrote reads it and runs it. Gauntlet sends that code the calls that go wrong in practice: a path that leaves the workspace, a symlink, a name with a hidden character, arguments of the wrong type, JSON cut off in the middle. It reports what your code did with each one.
+A model sends a tool call. Code you wrote reads it and runs it. Gauntlet sends that code the calls that go wrong in practice and reports what your code did with each one. It does this two ways.
 
-If you wrote an MCP server or an agent tool, one command tests it. No adapter is written.
+`gauntlet scan` works on any MCP server. It reads the tools the server lists and the schema of each one, and calls them with arguments it builds from that schema: paths that leave the directory, shell metacharacters, `file://` addresses, 10000 nested arrays. No adapter is written, and the server does not have to be a file server. With no flag it calls only the tools that read. `--write` adds the rest.
 
 ```
-gauntlet run --mcp "node {cwd}/dist/server.js {workspace}"
+gauntlet scan --mcp "node {cwd}/dist/server.js"
 ```
 
-If you are a team, the GitHub Action runs the same check on every pull request. `fail-on: safety` fails the build for a file written outside the workspace and not for a refused trailing comma. A baseline lets you turn it on before the code is clean.
+```
+2. safety  outside-read  read_note.path  CWE-22
+   The reply holds the contents of a file outside the server's directory, reached with a path that starts with ../.
+   call: {"name":"read_note","arguments":{"path":"../gauntlet-b102cf42-outside.txt"}}
+   fix:  Resolve the path against the allowed directory, follow symlinks, and refuse a result outside it.
+   4 more payloads on this argument did the same.
+
+3. safety  shell-injection  grep_notes.pattern  CWE-78
+   A command inside the argument ran: a ; and a command created the marker file it names.
+   call: {"name":"grep_notes","arguments":{"pattern":"gauntlet-b102cf42; touch /tmp/gauntlet-scan-x/guard/guard/gauntlet-b102cf42-outer/gauntlet-marker-1-9c41d0"}}
+   fix:  Do not build a shell command from an argument. Pass the arguments to the program as a list, with no shell.
+   5 more payloads on this argument did the same.
+```
+
+`gauntlet run` is the fixed suite: 28 scenarios for code that reads and writes files, each with an exact expected result. It tests a JavaScript adapter, a program in any language, an HTTP endpoint, or an MCP file server, and it is what the scoreboard and a CI baseline are built on.
+
+If you are a team, the GitHub Action runs the suite on every pull request. `fail-on: safety` fails the build for a file written outside the workspace and not for a refused trailing comma. A baseline lets you turn it on before the code is clean.
 
 If you answer for many agents and servers, `--sarif` writes the results in the format code-scanning tools read. Each scenario is a rule with its CWE id, so a failure lands in the same place as every other finding.
 
@@ -22,7 +38,7 @@ Gauntlet requires Node 22.
 
 `npx @mrnirmata/gauntlet run --adapter reference-hardened` runs the package. Install it with `npm i -D @mrnirmata/gauntlet`.
 
-`--mcp`, `--structured`, `--tier`, `--fail-on`, `--sarif`, and the scenarios after the first 12 need 0.2.0 or later. `gauntlet --version` prints what you have. From a checkout, `node dist/cli.js` stands in for `gauntlet`.
+`gauntlet scan` needs 0.3.0, which is not published yet. `--mcp`, `--structured`, `--tier`, `--fail-on`, `--sarif`, and the scenarios after the first 12 need 0.2.0 or later. `gauntlet --version` prints what you have. From a checkout, `node dist/cli.js` stands in for `gauntlet`.
 
 ```
 pnpm install
@@ -88,6 +104,92 @@ node dist/cli.js run --adapter ./examples/adapter-template.mjs
 The module's default export, or a named export `adapter`, must be an object with a non-empty `name` and a `run` function. `defineAdapter` from `@mrnirmata/gauntlet` returns that object and checks the type.
 
 Node loads a `.ts` adapter when it can strip types: Node 22.6 with `--experimental-strip-types`, or a Node 22 that strips types by default. If Node cannot load the TypeScript file, compile it to `.js` or run Gauntlet through `tsx`.
+
+## Scan any MCP server
+
+`gauntlet scan --mcp "<command>"` starts the server, lists its tools, and calls them.
+
+```
+gauntlet scan --mcp "node {cwd}/dist/server.js" --plan
+gauntlet scan --mcp "node {cwd}/dist/server.js"
+gauntlet scan --mcp "node {cwd}/dist/server.js" --write
+gauntlet scan --mcp "python3 {cwd}/server.py" --env API_KEY --tool search,fetch
+```
+
+A scan makes up the arguments of every call, so how much it calls is yours to say, in three steps.
+
+- `--plan` calls nothing. It lists the tools, which of them a scan would call, and why the others are left alone. Run it first on a server you did not write.
+- With no flag, a scan calls only the tools that are marked or named as reading: one the server marks read-only, or one whose name starts with `get_`, `list_`, `read_`, `search_`, `find_`, `fetch_` and the like and has no word after that which changes something, or could. `get_user` is called. `get_post`, `list_add`, and `get_and_delete` are not. That is where a path that leaves the directory or a `file://` address is most often found, and a tool that only reads has little to lose.
+- `--write` also calls the tools that nothing marks or names either way: `save_note`, `add`, `create_directory`. They change things, with made-up arguments. Run it where the server's data is a copy.
+- `--destructive` also calls the tools marked or named as removing, sending, or spending.
+
+For each tool it calls, the scan first makes a plain call from the tool's schema: every required argument, with a value of its type. Then it puts payloads in every string argument, one at a time, and sends calls the schema forbids.
+
+A finding is never a guess. Each one is something the scan saw:
+
+| finding             | tier       | what the scan saw                                                                 |
+| ------------------- | ---------- | --------------------------------------------------------------------------------- |
+| outside-read        | safety     | A secret planted in a file beside the server's directory came back in a reply.    |
+| outside-list        | safety     | The name of a file planted there, which was never sent, came back in a reply.     |
+| outside-write       | safety     | A file beside the server's directory was changed, deleted, or created.            |
+| shell-injection     | safety     | A marker file was created by a command that was inside an argument.               |
+| url-file-read       | safety     | The planted secret came back for a `file://` address.                             |
+| phantom-tool        | safety     | The server gave a result for a tool name it does not list, such as `constructor`. |
+| crash               | robustness | The server process exited.                                                        |
+| hang                | robustness | The server did not answer within `--timeout`.                                     |
+| bad-reply           | robustness | A reply had no result and no error.                                               |
+| schema-not-enforced | robustness | A call the tool's own schema rules out got a result.                              |
+| loopback-fetch      | note       | The server fetched an address on this machine that an argument gave it.           |
+| soft-errors         | note       | The server gave a result for a tool that does not exist.                          |
+
+Each finding has the call that caused it, so you can send it again, and one line on the fix. A file that appears outside is put down to the call that carried its name, however late it appeared. A change with no name on it that shows up after a later call is put down to the last call that named a place outside, and the finding says so.
+
+### What the report says it did not test
+
+A scan that found nothing is worth as much as what it reached. The table has a row for each tool, and the row says how far the scan got.
+
+```
+tool            status   calls  plain call  strings  paths  findings
+read_file       scanned  26     answered    1        1      0
+write_file      skipped  -      -           -        -      -         the server marks it destructive
+save_note       skipped  -      -           -        -      -         nothing says it only reads
+get_file_info   scanned  21     answered    1        0      0         no path that leaves a directory was sent to path: not seen to name a file in the scan's directory
+get_template    scanned  15     answered    1        0      0
+web_search      scanned  14     refused     1        0      0
+```
+
+- `skipped` with `nothing says it only reads` is a tool `--write` would call. The last lines of the report count them.
+- `plain call: refused` means the tool turned down even a call with nothing odd in it, usually for a missing key or a file it wanted. No finding means little for that tool. `--env NAME` gives the server a variable it needs.
+- `strings` is how many string arguments got payloads. A tool with `0` was sent only the calls its schema forbids.
+- `paths` is how many of those strings were also sent paths that leave a directory. `get_template` above has one string and no paths: a traversal through it was not looked for. The next section says why.
+- When an argument that looks like a path got none, the row names it. It also says when the commands were held back, for a tool that runs commands by design.
+- A scan in which no tool answered a plain call exits 2. Nothing was tested, and that is not a pass.
+- A server with the `soft-errors` note reports a failure as an ordinary result. For that server a result proves nothing, so `phantom-tool` and `schema-not-enforced` are not reported for it.
+
+### What keeps a scan from costing you
+
+A scan calls tools with made-up arguments. These rules are what it keeps to, in every mode.
+
+- It calls only what you let it. Without `--write` that is the tools marked or named as reading. A name that looks and then does more, like `get_and_delete`, is not one of them, and neither is a tool that requires an argument named `confirm` or `force`, at the top of its schema or one object down. A mark that is not `true` or `false` is read the careful way.
+- Every string the scan makes up names only something the scan made. A path that leaves the directory ends in a name with `gauntlet-` and the scan's eight random characters in it, or goes through the scan's own temp directory. None is `..` alone, an empty string, `/`, `~`, or a path of yours, and the value that is 10000 arrays deep has a word at its centre. Wherever a tool resolves such a path, it does not name a file that was there before. A value the schema itself fixes, with `const` or `enum`, is sent as the schema gives it.
+- A list is never sent empty, and a date is one nothing of yours is filed under: 1970-01-02, or 9999-12-31 for an argument named `since` or `after`, so a range of dates takes in nothing.
+- A required argument is not left out, unless the server marks the tool read-only. A missing argument names nothing, and is what a tool is most likely to read as "all of them" or as its own default file. A tool whose schema is deeper or wider than the scan fills in is not called, for the same reason.
+- A path that leaves a directory is sent only to an argument that was seen to work in the scan's own directory: the reply held text that only the file it named holds, or the file it named changed or appeared. That keeps what the scan leaves behind out of a directory it cannot see. It is evidence, not proof: a tool can use one argument in two places.
+- A switch is set to what does less: `dry_run` on, `force` off, `keep_existing` on. An option with a list of values gets the one that does least by its name: `list` before `delete_all`, `append` before `replace`. A switch or an option is not added when it is optional, and is not given a wrong value by the calls that break the schema, whatever type the schema writes it as. These go by names, and a name can mislead.
+- The scan's own files are in a directory four levels inside a new temp directory. Before it lists, writes, or removes anything there, it checks that each of those directories is still a directory and not a link a call put in its place. That holds for what a call left behind. It is a check and then an act, so a server that keeps swapping them while the scan works can still get between the two.
+- The server's environment has `PATH`, `LANG`, a temp `HOME`, a temp `TMPDIR`, and no other variable of yours. A tool that needs a token does not have one unless you pass it with `--env`.
+- A tool that runs commands by design, by its name or its description, is not sent the command payloads, and neither is an argument that is itself a command. The commands the scan tries to inject only `touch` a file in its temp directory.
+- A misspelled `--tool`, `--skip`, or `--ignore` name is an error before any tool is called.
+
+That is not a sandbox. The server is your code running as you, and with `--write` a tool that writes is asked to write. A tool that does harm under a name that says it reads is called without it. Scan a server whose worst case you accept, with the credentials you would give a test, and use `--write` where its data is a copy. SECURITY.md has the rest.
+
+A server started with `npx` or `uvx` downloads into the temp `HOME` every time it starts, and may not answer in time. Install it first and name the file: `--mcp "node /path/to/server/dist/index.js"`.
+
+### Options
+
+`--tool` and `--skip` choose which tools are called. `--ignore <kind>` or `--ignore <kind>:<tool>` leaves a finding out, for a server that reads any file on purpose. `--fail-on safety` lets only safety findings fail the run, and `--fail-on none` never fails it. `--max-calls` limits the calls to one tool. `--json` prints the report as one object.
+
+`scan` is new in 0.3.0 and may change.
 
 ## Safety and robustness
 
@@ -192,7 +294,7 @@ The action in this repo builds Gauntlet from its own checkout, then runs it in y
 
 The job summary gets a Markdown table of the results. When the run used a baseline, the summary adds regressions, improvements, and new scenarios. Outputs are `pass`, `fail`, `error`, `not-covered`, and `regressions`.
 
-`uses: MrNirmata/gauntlet@main` tracks the main branch. Pin a tag once one exists, for example `MrNirmata/gauntlet@v0.2.0`.
+`uses: MrNirmata/gauntlet@v0.2.0` pins a release. `@main` tracks the main branch.
 
 ```yaml
 name: gauntlet
@@ -205,7 +307,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: MrNirmata/gauntlet@main
+      - uses: MrNirmata/gauntlet@v0.2.0
         with:
           exec: python3 adapter.py
           baseline: gauntlet-baseline.json
@@ -224,7 +326,7 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4
-      - uses: MrNirmata/gauntlet@main
+      - uses: MrNirmata/gauntlet@v0.2.0
         with:
           mcp: node {cwd}/dist/server.js {workspace}
           fail-on: safety

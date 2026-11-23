@@ -12,8 +12,10 @@ export function track(cleanup: () => void): () => void {
   };
 }
 
+// Last in, first out. A process is started after the directory it runs in,
+// so it is killed before that directory is removed.
 export function runCleanups(): void {
-  for (const cleanup of [...cleanups]) {
+  for (const cleanup of [...cleanups].reverse()) {
     try {
       cleanup();
     } catch {

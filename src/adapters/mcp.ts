@@ -37,12 +37,75 @@ type Pending = {
   timer: NodeJS.Timeout;
 };
 
-type Session = {
+// Why a request to the server did not get an answer. A caller that has to
+// tell a server that exited from one Gauntlet stopped reads the kind, not
+// the wording of the message.
+export type McpFailureKind = "exit" | "timeout" | "oversize" | "stopped";
+
+export class McpFailure extends Error {
+  readonly kind: McpFailureKind;
+  constructor(kind: McpFailureKind, message: string) {
+    super(message);
+    this.kind = kind;
+  }
+}
+
+// A tool as the server lists it. inputSchema is whatever the server sent.
+export type McpTool = {
+  readonly name: string;
+  readonly description?: string;
+  readonly inputSchema?: unknown;
+  readonly annotations?: Readonly<Record<string, unknown>>;
+};
+
+export type McpReply = Reply;
+
+export type McpSession = {
   readonly workspace: string;
   readonly tools: ReadonlySet<string>;
+  readonly toolList: readonly McpTool[];
+  // The server's own name and version, from its answer to initialize.
+  readonly serverInfo: string;
   request(method: string, paramsJson?: string): Promise<Reply>;
   stop(): Promise<void>;
 };
+
+type Session = McpSession;
+
+export type McpStartOptions = {
+  // The whole environment of the server. Omit it to pass on Gauntlet's own.
+  readonly env?: Readonly<Record<string, string>>;
+};
+
+// Starts the server in dir and returns once it has listed its tools.
+export function openMcpSession(
+  command: string,
+  dir: string,
+  timeoutMs: number,
+  options: McpStartOptions = {},
+): Promise<McpSession> {
+  return startSession(command, dir, timeoutMs, options);
+}
+
+// The text of a tools/call result, and whether the server marked it an error.
+// withData also returns what an image, audio, or binary resource block
+// carries, as the base64 the server sent.
+export function readMcpResult(
+  reply: McpReply,
+  withData = false,
+): {
+  text: string;
+  failed: boolean;
+} {
+  if (reply.error !== undefined) {
+    return { text: reply.error.message, failed: true };
+  }
+  const result = reply.result;
+  return {
+    text: resultText(result, withData),
+    failed: isRecord(result) && result.isError === true,
+  };
+}
 
 export type McpCheck = {
   // Every tool the server lists.
@@ -302,7 +365,7 @@ function toRunOutput(reply: Reply, call: ToolCall): RunOutput {
 // Text from every block that carries some: a text block, and a resource
 // block with the file embedded. A reply with only structuredContent is
 // printed as JSON.
-function resultText(result: unknown): string {
+function resultText(result: unknown, withData = false): string {
   if (!isRecord(result)) return "";
   const parts: string[] = [];
   if (Array.isArray(result.content)) {
@@ -316,10 +379,26 @@ function resultText(result: unknown): string {
         typeof block.resource.text === "string"
       ) {
         parts.push(block.resource.text);
+      } else if (!withData) {
+      } else if (typeof block.data === "string") {
+        parts.push(block.data);
+      } else if (
+        isRecord(block.resource) &&
+        typeof block.resource.blob === "string"
+      ) {
+        parts.push(block.resource.blob);
       }
     }
   }
-  if (parts.length === 0 && result.structuredContent !== undefined) {
+  // A scan looks for a planted text anywhere in the reply, so it also reads
+  // the structured form when there is text beside it.
+  if (withData && result.structuredContent !== undefined) {
+    try {
+      parts.push(JSON.stringify(result.structuredContent));
+    } catch {
+      // Not something that can be printed. The text blocks stand.
+    }
+  } else if (parts.length === 0 && result.structuredContent !== undefined) {
     try {
       return JSON.stringify(result.structuredContent);
     } catch {
@@ -333,6 +412,7 @@ async function startSession(
   command: string,
   sandboxDir: string,
   timeoutMs: number,
+  options: McpStartOptions = {},
 ): Promise<Session> {
   // The server gets the path the system itself uses. On macOS a temp
   // directory is reached through a symlink, and a server that compares real
@@ -348,6 +428,7 @@ async function startSession(
     cwd: real,
     detached: true,
     stdio: "pipe",
+    ...(options.env === undefined ? {} : { env: { ...options.env } }),
   });
   const { stdin, stdout, stderr: errors } = child;
   if (stdin === null || stdout === null || errors === null) {
@@ -361,12 +442,14 @@ async function startSession(
   let nextId = 1;
   let ended: string | undefined;
 
-  const end = (reason: string): void => {
+  let endedAs: McpFailureKind = "exit";
+  const end = (reason: string, kind: McpFailureKind = "exit"): void => {
     if (ended !== undefined) return;
     ended = reason;
+    endedAs = kind;
     for (const waiting of pending.values()) {
       clearTimeout(waiting.timer);
-      waiting.reject(new Error(reason));
+      waiting.reject(new McpFailure(kind, reason));
     }
     pending.clear();
   };
@@ -438,7 +521,10 @@ async function startSession(
     drain();
     if (buffer.length > MAX_BUFFER_CHARS) {
       killGroup(child);
-      end(`mcp server sent a message over ${MAX_BUFFER_CHARS} bytes`);
+      end(
+        `mcp server sent a message over ${MAX_BUFFER_CHARS} bytes`,
+        "oversize",
+      );
     }
   });
   // A last message with no newline after it is still a message.
@@ -486,7 +572,7 @@ async function startSession(
   // the sandbox, so this waits for it to be gone before the sandbox is
   // deleted, but not for long.
   const stop = async (): Promise<void> => {
-    end("mcp server stopped");
+    end("mcp server stopped", "stopped");
     stdin.end();
     await wait(POLITE_STOP_MS);
     killGroup(child);
@@ -498,7 +584,9 @@ async function startSession(
   };
 
   const request = (method: string, paramsJson?: string): Promise<Reply> => {
-    if (ended !== undefined) return Promise.reject(new Error(ended));
+    if (ended !== undefined) {
+      return Promise.reject(new McpFailure(endedAs, ended));
+    }
     const id = nextId;
     nextId += 1;
     return new Promise<Reply>((resolve, reject) => {
@@ -506,8 +594,13 @@ async function startSession(
         pending.delete(id);
         // A server that did not answer one request is not asked another.
         killGroup(child);
-        end(`mcp ${method} timed out after ${timeoutMs}ms`);
-        reject(new Error(`mcp ${method} timed out after ${timeoutMs}ms`));
+        end(`mcp ${method} timed out after ${timeoutMs}ms`, "timeout");
+        reject(
+          new McpFailure(
+            "timeout",
+            `mcp ${method} timed out after ${timeoutMs}ms`,
+          ),
+        );
       }, timeoutMs);
       pending.set(id, { resolve, reject, timer });
       const params = paramsJson === undefined ? "" : `,"params":${paramsJson}`;
@@ -535,18 +628,32 @@ async function startSession(
       throw new Error("mcp initialize reply had no result");
     }
     send('{"jsonrpc":"2.0","method":"notifications/initialized"}');
-    const tools = await listTools(request);
-    return { workspace: sandboxDir, tools, request, stop };
+    const toolList = await listTools(request);
+    return {
+      workspace: sandboxDir,
+      tools: new Set(toolList.map((tool) => tool.name)),
+      toolList,
+      serverInfo: describeServer(hello.result),
+      request,
+      stop,
+    };
   } catch (error) {
     await stop();
     throw error;
   }
 }
 
-async function listTools(
-  request: Session["request"],
-): Promise<ReadonlySet<string>> {
-  const names = new Set<string>();
+function describeServer(hello: Record<string, unknown>): string {
+  const info = hello.serverInfo;
+  if (!isRecord(info) || typeof info.name !== "string") return "unnamed server";
+  return typeof info.version === "string"
+    ? `${info.name} ${info.version}`
+    : info.name;
+}
+
+async function listTools(request: Session["request"]): Promise<McpTool[]> {
+  const tools: McpTool[] = [];
+  const seen = new Set<string>();
   let cursor: string | undefined;
   for (let page = 0; page < MAX_TOOL_PAGES; page += 1) {
     const reply = await request(
@@ -559,11 +666,25 @@ async function listTools(
       );
     }
     const result = reply.result;
-    if (!isRecord(result) || !Array.isArray(result.tools)) return names;
+    if (!isRecord(result) || !Array.isArray(result.tools)) return tools;
     for (const tool of result.tools) {
-      if (isRecord(tool) && typeof tool.name === "string") names.add(tool.name);
+      if (!isRecord(tool) || typeof tool.name !== "string") continue;
+      if (seen.has(tool.name)) continue;
+      seen.add(tool.name);
+      tools.push({
+        name: tool.name,
+        ...(typeof tool.description === "string"
+          ? { description: tool.description }
+          : {}),
+        ...(tool.inputSchema === undefined
+          ? {}
+          : { inputSchema: tool.inputSchema }),
+        ...(isRecord(tool.annotations)
+          ? { annotations: tool.annotations }
+          : {}),
+      });
     }
-    if (typeof result.nextCursor !== "string") return names;
+    if (typeof result.nextCursor !== "string") return tools;
     cursor = result.nextCursor;
   }
   // A list that never ends is not a list of the server's tools.

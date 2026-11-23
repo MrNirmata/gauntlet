@@ -21,11 +21,19 @@ import {
 } from "./format.ts";
 import { runAll } from "./run.ts";
 import { formatSarif } from "./sarif.ts";
+import {
+  formatScan,
+  formatScanJson,
+  heldCounts,
+  scanTotals,
+} from "./scan/report.ts";
+import { type ScanReport, ScanUsageError, scanMcp } from "./scan/scan.ts";
 import { scenarios } from "./scenarios/index.ts";
+import { printable } from "./text.ts";
 import type { Adapter, Category, RunOptions, Scenario, Tier } from "./types.ts";
 
 const USAGE =
-  "usage: gauntlet list [--json] | gauntlet show <id> | gauntlet run (--adapter <name-or-path> | --exec <command> | --http <url> | --mcp <command>) [options]. gauntlet help lists the options.\n";
+  "usage: gauntlet list [--json] | gauntlet show <id> | gauntlet run (--adapter <name-or-path> | --exec <command> | --http <url> | --mcp <command>) [options] | gauntlet scan --mcp <command> [options]. gauntlet help lists the options.\n";
 
 const HELP = `Gauntlet feeds adversarial tool-call payloads to an adapter.
 
@@ -33,6 +41,8 @@ commands:
   gauntlet list [--json]     print every scenario
   gauntlet show <id>         print one scenario and the payloads it sends
   gauntlet run <target>      run the scenarios against an adapter
+  gauntlet scan --mcp <cmd>  call every tool of an MCP server with arguments made
+                             from its own schemas, and report what it did
   gauntlet help              print this text
   gauntlet --version         print the version
 
@@ -70,13 +80,33 @@ what fails the run:
   --strict                   with --baseline, count a new failing scenario as a regression
   --timeout <ms>             limit for one probe. The default is 10000
 
+scan options:
+  --tool <name>              scan only this tool. Repeat it, or separate names with commas
+  --skip <name>              leave this tool out
+  --plan                     list what would be called and why, and call nothing
+  --write                    also call tools that nothing marks or names as only reading.
+                             Without it a scan calls get_, list_, read_, search_ and the
+                             like, and tools the server marks read-only
+  --destructive              also call tools marked or named as removing, sending, or
+                             spending. It includes --write
+  --env <NAME[=value]>       give the server this variable. It gets PATH, LANG, a temp HOME,
+                             and no other variable of yours, unless you name it
+  --ignore <kind[:tool]>     leave findings of this kind out of the report and the exit code
+  --fail-on <tier>           any, safety, robustness, or none. The default is any
+  --max-calls <n>            calls per tool. The default is 300
+  --json, --name, --timeout  as for run
+
 exit codes:
-  0  no scenario that decides the run failed, errored, or regressed
-  1  a scenario that decides the run failed, errored, or regressed
-  2  the command line, the adapter, or a file was wrong
+  0  no scenario that decides the run failed, errored, or regressed.
+     For a scan: no finding of a tier that --fail-on counts
+  1  a scenario that decides the run failed, errored, or regressed.
+     For a scan: a finding of a tier that --fail-on counts
+  2  the command line, the adapter, or a file was wrong.
+     For a scan: also when no tool answered a plain call, so nothing was tested
 `;
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_SCAN_CALLS = 300;
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
 type RunMode =
@@ -128,6 +158,13 @@ export async function runCli(
     return command === "list"
       ? listCommand(argv.slice(1), stdout, stderr)
       : showCommand(argv.slice(1), stdout, stderr);
+  }
+  if (command === "scan") {
+    if (argv.includes("--help") || argv.includes("-h")) {
+      stdout.write(HELP);
+      return 0;
+    }
+    return scanCommand(argv.slice(1), stdout, stderr);
   }
   if (command !== "run") {
     stderr.write(USAGE);
@@ -262,6 +299,202 @@ function adapterFile(mode: RunMode): string | undefined {
   return mode.kind === "adapter" && isAdapterPath(mode.spec)
     ? mode.spec
     : undefined;
+}
+
+const SCAN_KINDS: readonly string[] = [
+  "outside-read",
+  "outside-list",
+  "outside-write",
+  "url-file-read",
+  "shell-injection",
+  "phantom-tool",
+  "crash",
+  "hang",
+  "bad-reply",
+  "schema-not-enforced",
+  "loopback-fetch",
+  "soft-errors",
+];
+
+async function scanCommand(
+  argv: readonly string[],
+  stdout: NodeJS.WritableStream,
+  stderr: NodeJS.WritableStream,
+): Promise<number> {
+  let mcp: string | undefined;
+  let name: string | undefined;
+  let timeoutMs = DEFAULT_TIMEOUT_MS;
+  let maxCalls = DEFAULT_SCAN_CALLS;
+  let json = false;
+  let destructive = false;
+  let write = false;
+  let planOnly = false;
+  let failOn: "any" | "safety" | "robustness" | "none" = "any";
+  const only: string[] = [];
+  const skip: string[] = [];
+  const ignore: { kind: string; tool: string | undefined }[] = [];
+  const env: Record<string, string> = {};
+  const valued = new Set([
+    "--mcp",
+    "--name",
+    "--timeout",
+    "--max-calls",
+    "--tool",
+    "--skip",
+    "--env",
+    "--ignore",
+    "--fail-on",
+  ]);
+  // Some of these messages quote the server: a tool name, what it printed
+  // when it failed to start.
+  const fail = (message: string): number => {
+    stderr.write(`${printable(message)}\n`);
+    return 2;
+  };
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === undefined) continue;
+    if (token === "--json") {
+      json = true;
+      continue;
+    }
+    if (token === "--destructive") {
+      destructive = true;
+      continue;
+    }
+    if (token === "--write") {
+      write = true;
+      continue;
+    }
+    if (token === "--plan") {
+      planOnly = true;
+      continue;
+    }
+    if (!valued.has(token)) return fail(`unknown argument ${token}`);
+    const value = argv[index + 1];
+    if (value === undefined || value.length === 0 || value.startsWith("--")) {
+      return fail(`missing ${token} value`);
+    }
+    index += 1;
+    if (token === "--mcp") mcp = value;
+    else if (token === "--name") name = value;
+    else if (token === "--tool" || token === "--skip") {
+      // "," names nothing. Read as no filter, --tool would scan every tool.
+      const names = splitList(value);
+      if (names.length === 0) return fail(`missing ${token} value`);
+      (token === "--tool" ? only : skip).push(...names);
+    } else if (token === "--timeout" || token === "--max-calls") {
+      if (!/^[1-9]\d*$/.test(value) || Number(value) > MAX_TIMEOUT_MS) {
+        return fail(`invalid ${token}`);
+      }
+      if (token === "--timeout") timeoutMs = Number(value);
+      else maxCalls = Number(value);
+    } else if (token === "--fail-on") {
+      if (
+        value !== "any" &&
+        value !== "safety" &&
+        value !== "robustness" &&
+        value !== "none"
+      ) {
+        return fail(
+          `invalid --fail-on ${value}; one of any, safety, robustness, none`,
+        );
+      }
+      failOn = value;
+    } else if (token === "--ignore") {
+      // outside-read, or outside-read:read_file for one tool only.
+      const colon = value.indexOf(":");
+      const kind = colon < 0 ? value : value.slice(0, colon);
+      const tool = colon < 0 ? undefined : value.slice(colon + 1);
+      if (!SCAN_KINDS.includes(kind)) {
+        return fail(`unknown finding ${kind}; one of ${SCAN_KINDS.join(", ")}`);
+      }
+      ignore.push({ kind, tool });
+    } else {
+      // NAME passes the variable on. NAME=value sets it.
+      const equals = value.indexOf("=");
+      const key = equals < 0 ? value : value.slice(0, equals);
+      const given = equals < 0 ? process.env[key] : value.slice(equals + 1);
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+        return fail(`invalid --env ${value}`);
+      }
+      if (given === undefined) return fail(`--env ${key} is not set here`);
+      env[key] = given;
+    }
+  }
+  if (mcp === undefined) return fail("missing --mcp");
+  let report: ScanReport;
+  try {
+    report = await scanMcp({
+      command: mcp,
+      name: name ?? `mcp:${mcp}`,
+      timeoutMs,
+      only,
+      skip,
+      ignored: ignore.flatMap((rule) =>
+        rule.tool === undefined ? [] : [rule.tool],
+      ),
+      write: write || destructive,
+      destructive,
+      env,
+      maxCallsPerTool: maxCalls,
+      planOnly,
+    });
+  } catch (error) {
+    // A misspelled tool name is found before anything is called.
+    if (error instanceof ScanUsageError) return fail(error.message);
+    return fail(`could not scan the MCP server: ${errorLine(error)}`);
+  }
+  const keep = (finding: ScanReport["findings"][number]): boolean =>
+    !ignore.some(
+      (rule) =>
+        rule.kind === finding.kind &&
+        (rule.tool === undefined || rule.tool === finding.tool),
+    );
+  const findings = report.findings.filter(keep);
+  const kept: ScanReport = {
+    ...report,
+    findings,
+    // The rows count what the report shows.
+    tools: report.tools.map((row) => ({
+      ...row,
+      findings: findings.filter((finding) => finding.tool === row.name).length,
+    })),
+  };
+  stdout.write(json ? formatScanJson(kept) : formatScan(kept));
+  const ignored = report.findings.length - findings.length;
+  if (ignored > 0) {
+    stderr.write(
+      `note: ${ignored} ${ignored === 1 ? "finding" : "findings"} left out by --ignore\n`,
+    );
+  }
+  if (planOnly) return 0;
+  const totals = scanTotals(findings);
+  const bad =
+    failOn === "none"
+      ? 0
+      : failOn === "any"
+        ? totals.safety + totals.robustness
+        : totals[failOn];
+  if (bad > 0) return 1;
+  // A scan in which no tool gave a result for a plain call tested nothing.
+  // That is not a clean scan, and it does not exit as one.
+  const exercised = kept.tools.some(
+    (row) => row.status === "scanned" && row.plain === "answered",
+  );
+  if (!exercised && failOn !== "none") {
+    const called = kept.tools.some((row) => row.status === "scanned");
+    const held = heldCounts(kept);
+    stderr.write(
+      called
+        ? "no tool answered a plain call, so nothing was tested. A tool may need a variable from --env, or the server may want arguments on its command line\n"
+        : held.writes > 0
+          ? "no tool was called, so nothing was tested. Nothing marks or names any of them as only reading. --write calls them, with made-up arguments\n"
+          : "no tool was called, so nothing was tested\n",
+    );
+    return 2;
+  }
+  return 0;
 }
 
 function listCommand(
@@ -586,11 +819,14 @@ async function resolveRunAdapter(
     // A server that cannot do that gets one message, not the same error on
     // every row, and never a row of passes it did not earn.
     const check = await server.check();
+    // Both lines quote the server: its tool names, or what it replied.
     if (check.problem !== undefined) {
-      stderr.write(`${check.problem}\n`);
+      stderr.write(`${printable(check.problem)}\n`);
       return undefined;
     }
-    if (check.note !== undefined) stderr.write(`note: ${check.note}\n`);
+    if (check.note !== undefined) {
+      stderr.write(`note: ${printable(check.note)}\n`);
+    }
     return server;
   }
   const adapter = await resolveAdapter(flags.mode.spec, stderr);
@@ -792,6 +1028,9 @@ if (isDirectRun()) {
   for (const [signal, code] of [
     ["SIGINT", 130],
     ["SIGTERM", 143],
+    // A closed terminal. What the run started is in its own process group
+    // and would not hear of it otherwise.
+    ["SIGHUP", 129],
   ] as const) {
     process.once(signal, () => {
       runCleanups();

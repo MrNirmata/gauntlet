@@ -118,6 +118,76 @@ What it did on the passes:
 
 The server also defends against one thing no scenario here can test. Its source pins the directory and opens with `O_NOFOLLOW`, against a symlink swapped between the check and the open. `reference-hardened` does not.
 
+### Scanned
+
+The same package under `gauntlet scan`, which calls the tools the server lists and not only the two that read and write. Run on 2026-11-23 on macOS with Node 25.9.
+
+```
+node dist/cli.js scan --mcp "node <path>/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js {workspace}" --name server-filesystem@2.4.0
+```
+
+```
+scan: server-filesystem@2.4.0
+server: secure-filesystem-server 2.4.0
+
+tool                       status   calls  plain call  strings  paths  findings
+read_file                  scanned  26     answered    1        1      0
+read_text_file             scanned  26     answered    1        1      0
+read_media_file            scanned  26     answered    1        1      0
+read_multiple_files        scanned  26     answered    1        1      0
+write_file                 skipped  -      -           -        -      -         the server marks it destructive
+append_file                skipped  -      -           -        -      -         the server marks it as not destructive, and not as read-only
+edit_file                  skipped  -      -           -        -      -         the server marks it destructive
+create_directory           skipped  -      -           -        -      -         the server marks it as not destructive, and not as read-only
+list_directory             scanned  27     answered    1        1      0
+list_directory_with_sizes  scanned  27     answered    1        1      0
+directory_tree             scanned  41     answered    2        1      0
+move_file                  skipped  -      -           -        -      -         the server marks it destructive
+copy_file                  skipped  -      -           -        -      -         the server marks it as not destructive, and not as read-only
+search_files               scanned  50     answered    3        0      0         no path that leaves a directory was sent to path: not seen to name a file in the scan's directory
+get_file_info              scanned  21     answered    1        0      0         no path that leaves a directory was sent to path: not seen to name a file in the scan's directory
+list_allowed_directories   scanned  1      answered    0        0      0         it publishes no arguments, so only a plain call was made
+
+0 safety, 0 robustness, 0 notes.
+10 of 10 scanned tools answered a plain call.
+3 tools were not called because nothing marks or names them as only reading. --write calls them too, with made-up arguments.
+3 tools were not called because they are marked or named as removing, sending, or spending. --destructive calls them too.
+```
+
+With no flag a scan calls the ten tools the server marks read-only. The server marks `append_file`, `create_directory`, and `copy_file` as changing things without destroying any, and `write_file`, `edit_file`, and `move_file` as destructive. With `--destructive` a scan calls all sixteen:
+
+```
+scan: server-filesystem@2.4.0
+server: secure-filesystem-server 2.4.0
+
+tool                       status   calls  plain call  strings  paths  findings
+read_file                  scanned  26     answered    1        1      0
+read_text_file             scanned  26     answered    1        1      0
+read_media_file            scanned  26     answered    1        1      0
+read_multiple_files        scanned  26     answered    1        1      0
+write_file                 scanned  39     answered    2        1      0
+append_file                scanned  39     answered    2        1      0
+edit_file                  scanned  52     answered    3        1      0
+create_directory           scanned  27     answered    1        1      0
+list_directory             scanned  27     answered    1        1      0
+list_directory_with_sizes  scanned  27     answered    1        1      0
+directory_tree             scanned  41     answered    2        1      0
+move_file                  scanned  49     answered    2        2      0
+copy_file                  scanned  49     answered    2        2      0
+search_files               scanned  50     answered    3        0      0         no path that leaves a directory was sent to path: not seen to name a file in the scan's directory
+get_file_info              scanned  21     answered    1        0      0         no path that leaves a directory was sent to path: not seen to name a file in the scan's directory
+list_allowed_directories   scanned  1      answered    0        0      0         it publishes no arguments, so only a plain call was made
+
+0 safety, 0 robustness, 0 notes.
+16 of 16 scanned tools answered a plain call.
+```
+
+Sixteen tools, each called with between 1 and 52 argument sets. No reply held the planted secret or the name of a planted file, nothing beside the directory changed, no injected command ran, and the server never exited or stopped answering. All 16 tools gave a result for a plain call, so the empty list is about a server that was doing its work.
+
+The `paths` column says where a traversal was looked for. Thirteen tools have an argument that was seen to read, list, or change a file in the scan's directory, and each such argument was sent the paths that leave it. `move_file` and `copy_file` have two. Two rows say what was not tried: `get_file_info` returns sizes and dates, and `search_files` matched nothing with the word it was given, so neither was seen to use its path there.
+
+The scan does not send the Unicode names or the hard link of the fixed suite, so the five fails in the table above are not in it.
+
 ## Not scored
 
 These were looked at before `--structured` and `--mcp` existed. Cline and Continue take a call that is already parsed, and `--structured` can now give them one. Neither has been run that way yet.
