@@ -64,34 +64,105 @@ const NEW_TEXT_NAME = /(^|[^a-z])(new|replacement|replace|with)($|[^a-z])/i;
 const URL_NAME =
   /(^|[^a-z])(url|urls|uri|uris|link|href|endpoint|website|webpage)($|[^a-z])/i;
 const COMMAND_NAME = /(^|[^a-z])(command|commands|cmd|shell|script)($|[^a-z])/i;
-const ID_NAME =
-  /(^|[^a-z])(id|ids|pid|uid|gid|port|index|offset|number)($|[^a-z])/i;
+const ID_NAME = /(^|[^a-z])(id|ids|pid|uid|gid|port|number)($|[^a-z])/i;
+// Where to begin. Nothing is the natural place.
+const START_NAME = /(^|[^a-z])(offset|index|start|skip|from|page)($|[^a-z])/i;
+// How much to return or keep. A plain call asks for plenty: one line of a
+// file shows nothing, and a log trimmed to one entry has lost the rest.
+const LIMIT_NAME =
+  /(^|[^a-z])(limit|length|size|max|maximum|lines|chars|bytes|entries|results|top|tail|head)($|[^a-z])/i;
 // A switch that makes a call do less. It is turned on, unless its name
 // turns it round: no_dry_run, skip_safety_check, disable_preview.
 const SAFE_SWITCH =
-  /(^|[^a-z])(dry|dryrun|preview|simulate|noop|readonly|safe|check)($|[^a-z])/i;
+  /(^|[^a-z])(dry|dryrun|preview|simulate|noop|readonly|read[^a-z]?only|safe|check)($|[^a-z])/i;
 const NEGATED =
   /(^|[^a-z])(no|not|non|skip|disable|disabled|without|dont|never|bypass|ignore|suppress|omit)($|[^a-z])/i;
 // A switch that makes a call do more. It is left off whatever its default.
 const RISKY_SWITCH =
-  /(^|[^a-z])(force|overwrite|recursive|delete|remove|purge|all|confirm|confirmed|yes|hard|permanent)($|[^a-z])/i;
+  /(^|[^a-z])(force|forced|overwrite|replace|recursive|delete|remove|purge|prune|clean|clear|wipe|reset|all|confirm|confirmed|yes|hard|permanent)($|[^a-z])/i;
+// A switch that holds on to what is there. It is turned on.
+const KEEP_SWITCH =
+  /(^|[^a-z])(keep|preserve|backup|existing|append)($|[^a-z])/i;
+// A value of an option that does less, and one that does more.
+const SAFE_OPTION =
+  /(^|[^a-z])(dry|preview|simulate|safe|soft|append|add|merge|keep|skip|fail|error|abort|none|no|false|off|read|readonly|r|ro|staging|test|dev|sandbox)($|[^a-z])/i;
+const RISKY_OPTION =
+  /(^|[^a-z])(replace|overwrite|write|hard|force|production|prod|yes|true|on|w|rw|all)($|[^a-z])/i;
 
 // What a name says a tool or an option does. The name is all there is to go
 // on: most servers mark nothing.
 const CHANGES =
-  /(^|[^a-z])(delete|remove|rm|rmdir|unlink|drop|destroy|purge|prune|wipe|erase|clear|clean|cleanup|empty|truncate|flush|expire|evict|kill|terminate|stop|halt|shutdown|reboot|restart|send|post|publish|deploy|release|pay|charge|refund|transfer|withdraw|purchase|buy|order|book|email|mail|sms|tweet|notify|invite|merge|push|reset|revert|rollback|format|uninstall|revoke|ban|block|cancel|overwrite|migrate|migration|apply)($|[^a-z])/i;
+  /(^|[^a-z])(delete|del|remove|rm|rmdir|unlink|drop|destroy|purge|prune|wipe|erase|expunge|nuke|shred|clear|clean|cleanup|empty|truncate|trim|flush|expire|evict|trash|discard|forget|unset|pop|dequeue|kill|terminate|stop|halt|shutdown|reboot|restart|send|post|publish|deploy|release|pay|charge|refund|transfer|withdraw|purchase|buy|order|book|email|mail|sms|tweet|notify|invite|merge|push|commit|stash|restore|reset|revert|rollback|rotate|archive|format|uninstall|revoke|ban|block|cancel|close|logout|overwrite|replace|reinit|migrate|migration|apply)($|[^a-z])/i;
 // The same verbs run together with what they act on: deletefile, dropdb.
 const CHANGES_PREFIX =
   /^(delete|remove|rmdir|unlink|drop|destroy|purge|wipe|erase|truncate|kill|uninstall)/i;
+// Verbs that are never the name of a thing. list_orders lists. list_and_purge
+// does not only list.
+const REMOVES =
+  /(^|[^a-z])(delete|del|remove|rm|rmdir|unlink|drop|destroy|purge|prune|wipe|erase|expunge|nuke|shred|clear|truncate|trim|flush|kill|uninstall|overwrite|replace)($|[^a-z])/i;
+const JOINED = /[^a-z](and|then|or)[^a-z]/i;
 // A name that starts by saying it only looks: get_post, list_orders.
 const LOOKS =
-  /^(get|list|read|search|find|fetch|show|view|describe|count|query|lookup|check|is|has|stat|info|status|peek|inspect|ls|cat|head|tail|diff|compare|validate|verify|explain|preview)($|[^a-z])/i;
+  /^(get|list|read|search|find|grep|fetch|show|view|describe|count|query|lookup|check|is|has|stat|info|status|peek|inspect|ls|cat|head|tail|diff|compare|validate|verify|explain|preview)($|[^a-z])/i;
+
+// What a tool's name says it does: only looks, removes or sends or spends,
+// or nothing either way.
+export function nature(name: string): "reads" | "removes" | "unknown" {
+  const spaced = words(name);
+  const removes = CHANGES.test(spaced) || CHANGES_PREFIX.test(spaced);
+  if (LOOKS.test(spaced)) {
+    // A second verb, or one that is never a noun, says it does more.
+    return JOINED.test(spaced) || REMOVES.test(spaced) ? "removes" : "reads";
+  }
+  return removes ? "removes" : "unknown";
+}
 
 // Whether a name says the thing removes, sends, or spends.
 export function soundsDestructive(name: string): boolean {
+  return nature(name) === "removes";
+}
+
+// Whether a name is one a switch has: an argument that turns something on,
+// whatever type the schema gives it.
+export function soundsLikeSwitch(name: string): boolean {
   const spaced = words(name);
-  if (LOOKS.test(spaced)) return false;
-  return CHANGES.test(spaced) || CHANGES_PREFIX.test(spaced);
+  return (
+    SAFE_SWITCH.test(spaced) ||
+    RISKY_SWITCH.test(spaced) ||
+    KEEP_SWITCH.test(spaced)
+  );
+}
+
+// What a switch is set to: on when that does less or keeps what is there.
+function switchValue(name: string, fallback: boolean): boolean {
+  const spaced = words(name);
+  const negated = NEGATED.test(spaced);
+  if (RISKY_SWITCH.test(spaced)) return negated;
+  if (SAFE_SWITCH.test(spaced) || KEEP_SWITCH.test(spaced)) return !negated;
+  return fallback;
+}
+
+// Of the values an option allows, the one that does least.
+function leastOf(options: readonly unknown[], name: string): unknown {
+  // true or false under another type: a switch with two values.
+  if (options.every((option) => typeof option === "boolean")) {
+    const wanted = switchValue(name, false);
+    return options.includes(wanted) ? wanted : options[0];
+  }
+  const named = options.filter(
+    (option): option is string => typeof option === "string",
+  );
+  const risky = (option: string): boolean => RISKY_OPTION.test(words(option));
+  const safe = (option: string): boolean => {
+    const spaced = words(option);
+    return LOOKS.test(spaced) || SAFE_OPTION.test(spaced);
+  };
+  return (
+    named.find((option) => safe(option) && !risky(option)) ??
+    named.find((option) => !risky(option) && !soundsDestructive(option)) ??
+    named.find((option) => !soundsDestructive(option)) ??
+    options[0]
+  );
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -258,31 +329,35 @@ export function readSchema(document: unknown): SchemaReader {
     if (schema.const !== undefined) return schema.const;
     spent += 1;
     if (Array.isArray(schema.enum) && schema.enum.length > 0) {
-      // Of the values allowed, one that only looks, or failing that one
-      // whose name does not say it removes or sends.
-      const named = schema.enum.filter(
-        (option): option is string => typeof option === "string",
-      );
-      return (
-        named.find((option) => LOOKS.test(words(option))) ??
-        named.find((option) => !soundsDestructive(option)) ??
-        schema.enum[0]
-      );
+      return leastOf(schema.enum, name);
     }
     const type = typeOf(schema);
     const spaced = words(name);
     if (type === "boolean") {
-      if (SAFE_SWITCH.test(spaced)) return !NEGATED.test(spaced);
-      if (RISKY_SWITCH.test(spaced)) return false;
-      return typeof schema.default === "boolean" ? schema.default : false;
+      return switchValue(
+        name,
+        typeof schema.default === "boolean" ? schema.default : false,
+      );
     }
     if (type === "integer" || type === "number") {
-      const low = typeof schema.minimum === "number" ? schema.minimum : 1;
+      // A switch written as a number is off, and a place to begin is the
+      // beginning.
+      const zero =
+        (RISKY_SWITCH.test(spaced) && !NEGATED.test(spaced)) ||
+        START_NAME.test(spaced);
+      const low =
+        typeof schema.minimum === "number" ? schema.minimum : zero ? 0 : 1;
       const high =
         typeof schema.maximum === "number"
           ? schema.maximum
           : Number.MAX_SAFE_INTEGER;
-      const wanted = ID_NAME.test(spaced) ? UNUSED_NUMBER : 1;
+      const wanted = zero
+        ? 0
+        : ID_NAME.test(spaced)
+          ? UNUSED_NUMBER
+          : LIMIT_NAME.test(spaced)
+            ? 1000
+            : 1;
       return Math.min(Math.max(wanted, low), high);
     }
     if (type === "array") {
@@ -451,9 +526,17 @@ export function readSchema(document: unknown): SchemaReader {
         const declared = asSchema(properties[name]);
         const property = resolved(declared);
         const type = typeOf(property);
-        // A switch is left as the plain call set it. A wrong value for one
-        // may read as on, and leaving it out gives the tool's own default.
-        if (type === "boolean") continue;
+        // A switch or an option is left as the plain call set it. A wrong
+        // value for one may read as on, and leaving it out gives the tool's
+        // own default. That goes for a switch of any type.
+        if (
+          type === "boolean" ||
+          Array.isArray(property.enum) ||
+          property.const !== undefined ||
+          soundsLikeSwitch(name)
+        ) {
+          continue;
+        }
         const wrong = wrongValue(type);
         if (wrong !== undefined && !open(declared) && !open(property)) {
           found.push({

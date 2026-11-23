@@ -6,7 +6,7 @@ Gauntlet feeds adversarial tool-call payloads to an adapter and prints pass, fai
 
 A model sends a tool call. Code you wrote reads it and runs it. Gauntlet sends that code the calls that go wrong in practice and reports what your code did with each one. It does this two ways.
 
-`gauntlet scan` works on any MCP server. It reads the tools the server lists and the schema of each one, and calls every tool with arguments it builds from that schema: paths that leave the directory, shell metacharacters, `file://` addresses, 10000 nested arrays. No adapter is written, and the server does not have to be a file server.
+`gauntlet scan` works on any MCP server. It reads the tools the server lists and the schema of each one, and calls them with arguments it builds from that schema: paths that leave the directory, shell metacharacters, `file://` addresses, 10000 nested arrays. No adapter is written, and the server does not have to be a file server. With no flag it calls only the tools that read. `--write` adds the rest.
 
 ```
 gauntlet scan --mcp "node {cwd}/dist/server.js"
@@ -107,17 +107,23 @@ Node loads a `.ts` adapter when it can strip types: Node 22.6 with `--experiment
 
 ## Scan any MCP server
 
-`gauntlet scan --mcp "<command>"` starts the server, lists its tools, and calls each one.
+`gauntlet scan --mcp "<command>"` starts the server, lists its tools, and calls them.
 
 ```
 gauntlet scan --mcp "node {cwd}/dist/server.js" --plan
 gauntlet scan --mcp "node {cwd}/dist/server.js"
+gauntlet scan --mcp "node {cwd}/dist/server.js" --write
 gauntlet scan --mcp "python3 {cwd}/server.py" --env API_KEY --tool search,fetch
 ```
 
-`--plan` calls nothing. It lists the tools, which of them a scan would call, and why the others are left alone. Run it first on a server you did not write.
+A scan makes up the arguments of every call, so how much it calls is yours to say, in three steps.
 
-For each tool the scan first makes a plain call from the tool's schema: every required argument, with a value of its type. Then it puts payloads in every string argument, one at a time, and sends calls the schema forbids.
+- `--plan` calls nothing. It lists the tools, which of them a scan would call, and why the others are left alone. Run it first on a server you did not write.
+- With no flag, a scan calls only the tools that are marked or named as reading: one the server marks read-only, or one whose name starts with `get_`, `list_`, `read_`, `search_`, `find_`, `fetch_` and the like. That is where a path that leaves the directory or a `file://` address is most often found, and a tool that only reads has little to lose.
+- `--write` also calls the tools that nothing marks or names either way: `save_note`, `add`, `create_directory`. They change things, with made-up arguments. Run it where the server's data is a copy.
+- `--destructive` also calls the tools marked or named as removing, sending, or spending.
+
+For each tool it calls, the scan first makes a plain call from the tool's schema: every required argument, with a value of its type. Then it puts payloads in every string argument, one at a time, and sends calls the schema forbids.
 
 A finding is never a guess. Each one is something the scan saw:
 
@@ -146,11 +152,13 @@ A scan that found nothing is worth as much as what it reached. The table has a r
 tool            status   calls  plain call  strings  paths  findings
 read_file       scanned  26     answered    1        1      0
 write_file      skipped  -      -           -        -      -         the server marks it destructive
+save_note       skipped  -      -           -        -      -         nothing says it only reads
 get_file_info   scanned  21     answered    1        0      0         no path that leaves a directory was sent to path: not seen to name a file in the scan's directory
 get_template    scanned  15     answered    1        0      0
 web_search      scanned  14     refused     1        0      0
 ```
 
+- `skipped` with `nothing says it only reads` is a tool `--write` would call. The last lines of the report count them.
 - `plain call: refused` means the tool turned down even a call with nothing odd in it, usually for a missing key or a file it wanted. No finding means little for that tool. `--env NAME` gives the server a variable it needs.
 - `strings` is how many string arguments got payloads. A tool with `0` was sent only the calls its schema forbids.
 - `paths` is how many of those strings were also sent paths that leave a directory. `get_template` above has one string and no paths: a traversal through it was not looked for. The next section says why.
@@ -160,20 +168,19 @@ web_search      scanned  14     refused     1        0      0
 
 ### What keeps a scan from costing you
 
-A scan calls tools with made-up arguments. These rules are there so that a wrong guess stays cheap.
+A scan calls tools with made-up arguments. These rules are what it keeps to, in every mode.
 
-- The server runs in a directory four levels inside a new temp directory, and no payload goes further than one level above it. Its environment has `PATH`, `LANG`, a temp `HOME`, a temp `TMPDIR`, and no other variable of yours. A tool that needs a token does not have one unless you pass it with `--env`.
-- A tool is not called if the server marks it destructive, or marks it not read-only and says nothing more, or if its name says it removes, sends, or spends: `delete_`, `drop`, `clear`, `cleanup`, `send_`, `pay`, `publish`, `deploy`, and the like. A name that starts with `get_`, `list_`, `read_`, or `search_` is taken at its word. `--destructive` calls the rest too, and so does naming one with `--tool`.
-- A path that leaves a directory, such as `../x`, is sent only to an argument that was seen to work in the scan's own directory. That is decided for each argument, on evidence: the reply held text that only the file it named holds, or the file it named changed or appeared. A file the server writes for itself, a log or a cache, is not evidence. A server that keeps its data in a directory of yours would resolve `../x` against that directory, and the scan could not see what happened, so such an argument gets no such path.
-- An argument that was seen to work only with a path written in full gets paths written in full, all of them under the scan's temp directory.
-- Each argument of a call gets a value no other argument has, so what a call did can be put down to the argument that named it.
-- A switch is set to what does less: `dry_run` on, `force` off, `no_dry_run` off. An option with a list of values gets one that only looks, such as `list`, before one named `delete_all`. A switch is never left out or given a wrong value by the calls that break the schema.
-- A required argument is left out only of a tool the server marks read-only, or where the scan would see what that did.
-- Every name the scan makes up starts with `gauntlet-` and eight random characters. No payload is an empty string, `/`, `~`, or a path of yours. The commands it tries to inject only `touch` a file in its temp directory.
-- A tool that runs commands by design, by its name or its description, is not sent the command payloads, and neither is an argument that is itself a command. Running a command is not a finding there, and the row says they were held back.
+- It calls only what you let it. Without `--write` that is the tools marked or named as reading. A name that looks and then does more, like `get_and_delete`, is not one of them, and neither is a tool that requires an argument named `confirm` or `force`.
+- Every payload names only something the scan made. A path that leaves the directory ends in a name with `gauntlet-` and the scan's eight random characters in it, or goes through the scan's own temp directory. No payload is `..` alone, an empty string, `/`, `~`, or a path of yours, and the value that is 10000 arrays deep has a word at its centre. Wherever a tool resolves such a path, it does not name a file that was there before.
+- A required argument is not left out, unless the server marks the tool read-only. A missing argument names nothing, and is what a tool is most likely to read as "all of them" or as its own default file.
+- A path that leaves a directory is sent only to an argument that was seen to work in the scan's own directory: the reply held text that only the file it named holds, or the file it named changed or appeared. That keeps what the scan leaves behind out of a directory it cannot see. It is evidence, not proof: a tool can use one argument in two places.
+- A switch is set to what does less: `dry_run` on, `force` off, `keep_existing` on. An option with a list of values gets the one that does least by its name: `list` before `delete_all`, `append` before `replace`. A switch or an option is not added when it is optional, and is not given a wrong value by the calls that break the schema. These go by names, and a name can mislead.
+- The scan's own files are in a directory four levels inside a new temp directory. Before it lists, writes, or removes anything there, it checks that each of those directories is still a directory and not a link a call put in its place.
+- The server's environment has `PATH`, `LANG`, a temp `HOME`, a temp `TMPDIR`, and no other variable of yours. A tool that needs a token does not have one unless you pass it with `--env`.
+- A tool that runs commands by design, by its name or its description, is not sent the command payloads, and neither is an argument that is itself a command. The commands the scan tries to inject only `touch` a file in its temp directory.
 - A misspelled `--tool`, `--skip`, or `--ignore` name is an error before any tool is called.
 
-That is not a sandbox. The server is your code running as you. A tool that does harm under a name the scan does not recognise is called, and a server can reach the network. Scan a server whose worst case you accept, with the credentials you would give a test. SECURITY.md has the rest.
+That is not a sandbox. The server is your code running as you, and with `--write` a tool that writes is asked to write. A tool that does harm under a name that says it reads is called without it. Scan a server whose worst case you accept, with the credentials you would give a test, and use `--write` where its data is a copy. SECURITY.md has the rest.
 
 A server started with `npx` or `uvx` downloads into the temp `HOME` every time it starts, and may not answer in time. Install it first and name the file: `--mcp "node /path/to/server/dist/index.js"`.
 

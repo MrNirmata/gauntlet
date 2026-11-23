@@ -5,9 +5,11 @@
 - Add `gauntlet scan --mcp <command>`. It reads the tools an MCP server lists and the schema of each one, makes a plain call from the schema, puts payloads in every string argument, and sends calls the schema forbids. It works on a server with any tools, not only file tools.
 - A finding is something the scan saw: a planted secret in a reply, as text or as base64, a planted file that changed, a marker file a payload created, a server that exited or stopped answering, a result for a call its schema rules out. Each has the call that caused it and one line on the fix.
 - `--plan` lists the tools a scan would call and why the others are left alone, and calls nothing.
-- A tool is not called when the server marks it destructive, marks it not read-only and says no more, or has a name that says it removes, sends, or spends. `--destructive` calls those, and so does naming one with `--tool`.
-- A path that leaves a directory is sent only to an argument seen to work in the scan's own directory. The evidence is the reply or the file the argument named, never a file the server wrote for itself, and it is kept for each argument. A server that keeps its data elsewhere is not sent `../`.
-- A plain call sets switches to what does less and picks an option that only looks. The calls that break the schema leave switches alone, and leave an argument out only where that is seen to be safe.
+- With no flag a scan calls only tools marked or named as reading. `--write` adds the tools that nothing marks or names either way, and `--destructive` adds the ones marked or named as removing, sending, or spending, and the ones that require a confirmation. Naming a tool with `--tool` calls it.
+- Every payload names only something the scan made. None is `..` alone or an empty string, and a required argument is left out only of a tool marked read-only.
+- A path that leaves a directory is sent only to an argument seen to work in the scan's own directory. The evidence is the reply or the file the argument named, never a file the server wrote for itself, and it is kept for each argument.
+- A plain call sets switches and options to what their names say does less, and adds no optional one. The calls that break the schema leave them alone.
+- The scan checks that its own directories are still directories, and not links a call put there, before it lists, writes, or removes anything in them.
 - The report has a row for each tool: how many calls, whether the plain call got a result, how many string arguments got payloads, how many of those got paths that leave a directory, and what was held back. A scan in which no tool answered a plain call exits 2.
 - A server that gives a result for a tool that does not exist gets one `soft-errors` note, and no finding that depends on telling a result from an error. A result that reads as a refusal is not counted as accepting a bad call.
 - A reply over 4 MiB is not a finding. The row says it was too large to read.

@@ -21,14 +21,24 @@
 // locked          one tool leaves a directory that cannot be written
 // wide            a schema with 60 required properties, each the schema again
 // minlength       a string that must be 600 million characters long
-import { execSync } from "node:child_process";
+// mount <dir>     one tool puts a symlink to <dir> where it is told
+// sync <dir>      tools that use an argument where they run and in <dir> too
+// pipe            one tool makes a named pipe
+// everywhere      one tool rewrites every file it can reach, links followed
+// softnone        answers an unknown tool with a result, and no real call
+import { execFileSync, execSync } from "node:child_process";
 import {
   appendFileSync,
   chmodSync,
+  cpSync,
+  existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -277,7 +287,7 @@ const sets = {
       },
     },
     // Replaces one text with another, and fails when the first is not there.
-    replace_text: {
+    edit_text: {
       inputSchema: schema(
         { path: string, old_text: string, new_text: string },
         ["path", "old_text", "new_text"],
@@ -385,6 +395,19 @@ const sets = {
       inputSchema: schema({ table: string, limit: number }, ["table", "limit"]),
       run: done,
     },
+    // Optional, and not a place for a payload. A scan has no reason to add
+    // either, and one of them is what makes the tool act.
+    load_notes: {
+      inputSchema: schema(
+        {
+          source: string,
+          strategy: { type: "string", enum: ["replace", "merge"] },
+          confirm: { const: "yes" },
+        },
+        ["source"],
+      ),
+      run: done,
+    },
   },
   marks: {
     clear_all: bare(),
@@ -406,6 +429,15 @@ const sets = {
     read_email: bare(),
     // A real tool with a name every object has.
     toString: bare(),
+    // Will not run unless it is told the caller means it.
+    seed_store: {
+      inputSchema: schema({ confirm: { type: "string", enum: ["yes"] } }, [
+        "confirm",
+      ]),
+      run: done,
+    },
+    // Looks, and then does not only look.
+    list_and_purge: bare(),
   },
   softtool: {
     add: {
@@ -459,6 +491,104 @@ const sets = {
       run: done,
     },
   },
+  mount: {
+    // Makes the store show up where the server runs.
+    link_store: {
+      inputSchema: schema({ folder: string }, ["folder"]),
+      run: ({ folder }) => {
+        const at = path.resolve(cwd, String(folder));
+        rmSync(at, { recursive: true, force: true });
+        symlinkSync(extra, at);
+        return text("linked");
+      },
+    },
+  },
+  sync: {
+    // A working copy where the server runs, and the store in <dir>.
+    sync_notebook: {
+      inputSchema: schema({ name: string }, ["name"]),
+      run: ({ name }) => {
+        const local = path.resolve(cwd, String(name));
+        const store = path.join(extra, String(name));
+        if (!existsSync(local)) {
+          mkdirSync(local);
+          return text("pulled");
+        }
+        rmSync(store, { recursive: true, force: true });
+        cpSync(local, store, { recursive: true });
+        return text("pushed");
+      },
+    },
+    // The schema requires path. The code has a default all the same.
+    save_settings: {
+      inputSchema: schema({ path: string, content: string }, [
+        "path",
+        "content",
+      ]),
+      run: ({ path: given, content }) => {
+        writeFileSync(
+          given === undefined
+            ? path.join(extra, "settings.json")
+            : path.resolve(cwd, String(given)),
+          String(content),
+        );
+        return text("saved");
+      },
+    },
+  },
+  pipe: {
+    make_pipe: {
+      inputSchema: schema({ path: string }, ["path"]),
+      run: ({ path: given }) => {
+        execFileSync("mkfifo", [path.resolve(cwd, String(given))]);
+        return text("made");
+      },
+    },
+  },
+  everywhere: {
+    // Stays in its directory, links followed.
+    read_note: {
+      inputSchema: schema({ path: string }, ["path"]),
+      run: ({ path: given }) => {
+        const real = realpathSync(path.resolve(cwd, String(given)));
+        if (!real.startsWith(`${realpathSync(cwd)}${path.sep}`))
+          return refuse("outside the directory");
+        return text(readFileSync(real, "utf8"));
+      },
+    },
+    // No path at all. It walks the directory with stat, which follows links.
+    rewrite_all: {
+      inputSchema: schema({ search: string, replacement: string }, [
+        "search",
+        "replacement",
+      ]),
+      run: ({ search, replacement }) => {
+        const walk = (directory, depth) => {
+          if (depth > 3) return;
+          for (const name of readdirSync(directory)) {
+            const file = path.join(directory, name);
+            if (statSync(file).isDirectory()) walk(file, depth + 1);
+            else
+              writeFileSync(
+                file,
+                readFileSync(file, "utf8").replaceAll(
+                  String(search),
+                  String(replacement),
+                ),
+              );
+          }
+        };
+        walk(cwd, 0);
+        return text("rewritten");
+      },
+    },
+  },
+  softnone: {
+    search: {
+      inputSchema: schema({ query: string }, ["query"]),
+      run: () => text("missing API key", true),
+    },
+  },
   none: {
     search: {
       inputSchema: schema({ query: string }, ["query"]),
@@ -506,6 +636,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       : undefined;
     if (!tool) {
       if (mode === "errtext") ok(refuse(`unknown tool ${message.params.name}`));
+      else if (mode === "softnone") ok(text("no such tool"));
       else
         send({
           jsonrpc: "2.0",
@@ -517,7 +648,7 @@ for await (const line of createInterface({ input: process.stdin })) {
         });
       continue;
     }
-    if (mode === "choices" || mode === "cwdlog" || mode === "mixed") {
+    if (["choices", "cwdlog", "mixed", "sync"].includes(mode)) {
       // What a server would make of the arguments, nested arrays included.
       const seen = Object.fromEntries(
         Object.entries(message.params.arguments ?? {}).map(([key, value]) => {

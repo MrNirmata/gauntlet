@@ -1,11 +1,16 @@
 import { randomBytes } from "node:crypto";
 import {
-  chmodSync,
+  closeSync,
+  constants,
+  fchmodSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -25,10 +30,11 @@ import {
 import { track } from "../cleanup.ts";
 import {
   type BaseValues,
+  isRecord,
+  nature,
   readSchema,
   type SchemaReader,
   type StringPoint,
-  soundsDestructive,
   withString,
   withValue,
   words,
@@ -119,7 +125,9 @@ export type ScanOptions = {
   // Tools named with --ignore. Like the two above, a name the server does
   // not have is an error before any call.
   readonly ignored: readonly string[];
-  // Also call tools that are marked, or named, as changing or sending.
+  // Also call tools that nothing marks or names as only reading.
+  readonly write: boolean;
+  // Also call tools that are marked, or named, as removing or sending.
   readonly destructive: boolean;
   // Variables the server is started with, on top of PATH and a temp HOME.
   readonly env: Readonly<Record<string, string>>;
@@ -156,12 +164,18 @@ const MAX_RESTARTS = 3;
 const SETTLE_MS = 150;
 
 // Why a tool is not called unless it was asked for. The scan makes up its
-// arguments, so a tool that removes, sends, or spends is left alone.
+// arguments, so by default it calls only what is marked or named as reading.
+// WRITES are the reasons --write lifts, and HELD the ones --destructive does.
+export const WRITES = {
+  unknown: "nothing says it only reads",
+  marked: "the server marks it as not destructive, and not as read-only",
+} as const;
 export const HELD = {
   marked: "the server marks it destructive",
   unmarked:
     "the server says it is not read-only, and the default for that is destructive",
   named: "its name says it removes, sends, or spends",
+  confirm: "it requires a confirmation",
 } as const;
 
 // A tool that runs what it is given. A command in its argument running is
@@ -237,6 +251,7 @@ type Canaries = {
   // A file beside the workspace, and one in a directory beside it.
   readonly secretFile: string;
   readonly deepFile: string;
+  readonly outsideDir: string;
   readonly secretText: string;
   // Which of the strings a call was given the call was seen to use in the
   // workspace: the reply holds what only the file it names holds, or what
@@ -267,7 +282,7 @@ type Canaries = {
 export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
   const canaries = plant();
   const untrack = track(() => {
-    removeTree(canaries.top);
+    removeTree(canaries.top, canaries.top);
   });
   let loopback: Loopback | undefined;
   let session: McpSession | undefined;
@@ -372,6 +387,7 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
   const collect = (current: Owner, named: boolean): void => {
     const left = canaries.restore();
     const blame = (what: string): void => {
+      // The call that just ran named a place outside, or nothing has yet.
       if (named || lastOutside === undefined) {
         add(
           "outside-write",
@@ -382,12 +398,26 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
         );
         return;
       }
+      // An earlier call to the same tool named one, and this call did not:
+      // the change is that call's, noticed late.
+      if (lastOutside.tool === current.tool) {
+        add(
+          "outside-write",
+          lastOutside.tool,
+          lastOutside.argument,
+          `${what}. It was noticed after a later call to the same tool, and is put down to the last call that named a place outside: ${lastOutside.what}.`,
+          lastOutside.call,
+        );
+        return;
+      }
+      // Another tool's call. This one may have written through a symlink
+      // in its directory, or the other tool may have still been working.
       add(
         "outside-write",
-        lastOutside.tool,
-        lastOutside.argument,
-        `${what}. It was noticed after a later call, and is put down to the last call that named a place outside: ${lastOutside.what}.`,
-        lastOutside.call,
+        current.tool,
+        current.argument,
+        `${what}, noticed after ${current.what}. This call named no place outside: it wrote through a symlink in the server's directory, or an earlier call to ${lastOutside.tool} was still working.`,
+        current.call,
       );
     };
     for (const name of left.created) {
@@ -666,7 +696,7 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
     untrack();
     // After the report is made. A file a call left that cannot be removed
     // does not cost the user the report.
-    removed = removeTree(canaries.top);
+    removed = removeTree(canaries.top, canaries.top);
   }
   return removed ? report : { ...report, leftover: canaries.top };
 
@@ -871,6 +901,13 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
           .find((item) => item.name === name);
         if (extra === undefined) continue;
         const args = withValue(plain, name, extra.value);
+        // An optional switch or option is not added: it has no string to
+        // put a payload in, and adding it only makes the call do more.
+        if (
+          !reader.points(args).points.some((point) => point.pointer[0] === name)
+        ) {
+          break;
+        }
         const key = JSON.stringify(args);
         if (sent.has(key)) continue;
         sent.add(key);
@@ -925,25 +962,10 @@ export async function scanMcp(options: ScanOptions): Promise<ScanReport> {
     if (!softErrors && status === "result") {
       const accepted: string[] = [];
       let example = "";
-      // A missing argument is what a tool is most likely to read as "all of
-      // them", or to turn into a name. One is left out only of a tool the
-      // server marks read-only, or where the scan would see the name land:
-      // an argument seen to name a file in the scan's directory.
-      const canDrop = (name: string): boolean => {
-        if (readOnly) return true;
-        const target = targets.find(
-          (item) =>
-            item.args === plain &&
-            item.point.pointer.length === 1 &&
-            item.point.pointer[0] === name,
-        );
-        const current = valueAt(plain, [name]);
-        return (
-          target?.anchored === true &&
-          typeof current === "string" &&
-          !path.isAbsolute(current)
-        );
-      };
+      // A missing argument names nothing, and is what a tool is most likely
+      // to read as "all of them" or as its own default file. One is left out
+      // only of a tool the server marks read-only.
+      const canDrop = (): boolean => readOnly;
       for (const violation of reader.violations(plain, canDrop)) {
         const sent = await call(
           undefined,
@@ -1055,12 +1077,36 @@ function skipReason(tool: McpTool, options: ScanOptions): string | undefined {
   // Named with --tool: the user asked for this one.
   if (options.destructive || options.only.includes(tool.name)) return undefined;
   const marks = tool.annotations ?? {};
+  const writes = (reason: string): string | undefined =>
+    options.write ? undefined : reason;
   if (marks.destructiveHint === true) return HELD.marked;
   if (marks.readOnlyHint === true) return undefined;
-  if (marks.destructiveHint === false) return undefined;
-  // The protocol's default for a tool that is not read-only is destructive.
-  if (marks.readOnlyHint === false) return HELD.unmarked;
-  return soundsDestructive(tool.name) ? HELD.named : undefined;
+  // A tool that will not run without "confirm" or "force" is asking whether
+  // the caller means it. A scan does not.
+  const schema = isRecord(tool.inputSchema) ? tool.inputSchema : {};
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  if (
+    required.some(
+      (name) =>
+        typeof name === "string" &&
+        /(^|[^a-z])(confirm|confirmed|confirmation|force|yes)($|[^a-z])/i.test(
+          words(name),
+        ),
+    )
+  ) {
+    return HELD.confirm;
+  }
+  if (marks.readOnlyHint === false) {
+    // The protocol's default for a tool that is not read-only is destructive.
+    return marks.destructiveHint === false
+      ? writes(WRITES.marked)
+      : HELD.unmarked;
+  }
+  // What the server says outright counts for more than a name.
+  if (marks.destructiveHint === false) return writes(WRITES.marked);
+  const says = nature(tool.name);
+  if (says === "removes") return HELD.named;
+  return says === "reads" ? undefined : writes(WRITES.unknown);
 }
 
 function isCommandTool(tool: McpTool): boolean {
@@ -1075,31 +1121,60 @@ function isCommandTool(tool: McpTool): boolean {
 
 // Removes a directory and what is in it. A call can leave a directory that
 // cannot be written, as a package cache does. When removing fails, the
-// directories are made writable and it is tried once more.
-function removeTree(target: string): boolean {
+// directories are made writable and it is tried once more. top is the scan's
+// own temp directory, and nothing outside it is touched.
+function removeTree(target: string, top: string): boolean {
   for (const attempt of [0, 1]) {
     try {
       rmSync(target, { recursive: true, force: true, maxRetries: 2 });
       return true;
     } catch {
-      if (attempt === 0) unlock(target, 0);
+      if (attempt === 0) unlock(target, top, 0);
     }
   }
   return false;
 }
 
-function unlock(target: string, depth: number): void {
+// Makes a directory under top writable, and the directories in it. A server
+// may still have something running that swaps a directory for a symlink, so
+// a name is not trusted between one step and the next: the directory is
+// opened without following a link, checked to be the one that is really at
+// that place under top, and changed through what was opened.
+function unlock(target: string, top: string, depth: number): void {
   if (depth > 64) return;
+  let handle: number | undefined;
   try {
-    // A symlink is not followed: what it points at is not the scan's.
-    if (!lstatSync(target).isDirectory()) return;
-    chmodSync(target, 0o700);
-    for (const name of readdirSync(target)) {
-      unlock(path.join(target, name), depth + 1);
+    handle = openSync(
+      target,
+      constants.O_RDONLY |
+        (constants.O_DIRECTORY ?? 0) |
+        (constants.O_NOFOLLOW ?? 0),
+    );
+    const opened = fstatSync(handle);
+    const real = realpathSync(target);
+    const there = lstatSync(real);
+    if (
+      !opened.isDirectory() ||
+      (real !== top && !real.startsWith(`${top}${path.sep}`)) ||
+      there.ino !== opened.ino ||
+      there.dev !== opened.dev
+    ) {
+      return;
     }
+    fchmodSync(handle, 0o700);
   } catch {
     // What cannot be opened up is left, and the report says so.
+    return;
+  } finally {
+    if (handle !== undefined) closeSync(handle);
   }
+  let names: string[] = [];
+  try {
+    names = readdirSync(target);
+  } catch {
+    return;
+  }
+  for (const name of names) unlock(path.join(target, name), top, depth + 1);
 }
 
 function probesFor(given: {
@@ -1163,7 +1238,9 @@ function probesFor(given: {
         "a path through a symlinked directory",
         `${canaries.linkDir}/${deepName}`,
       ],
-      ["the parent directory", ".."],
+      // Never the bare parent: wherever a path lands, it names only what
+      // the scan made.
+      ["a directory one level up", `../${path.basename(canaries.outsideDir)}`],
       ["a symlinked directory", canaries.linkDir],
       ["a new file one level up", `../${created}`, created],
     ];
@@ -1290,6 +1367,9 @@ function plant(): Canaries {
   // In the directory, and never sent. It starts with the word a plain call
   // searches for, so a search by name finds it.
   const innerName = `${text}-inner-${token(8)}.txt`;
+  // What the file in the directory holds, with the same word in front.
+  const innerMark = `gauntlet-inner-${token(12)}`;
+  const innerBody = `${text} ${innerMark}\n`;
   // The files outside hold the word too, so a tool that searches or replaces
   // finds something in them, if it gets that far.
   const secretBody = `${text} ${secretText}\n`;
@@ -1303,23 +1383,50 @@ function plant(): Canaries {
   const stuck = new Set<string>();
   const here = (name: string): string => path.join(workspace, name);
 
-  const write = (file: string, body: string): void => {
-    let current: string | undefined;
-    try {
-      current = readFileSync(file, "utf8");
-    } catch {
-      current = undefined;
+  // The scan's own directories, from the top down. A call can replace any
+  // of them with a symlink to somewhere else. Before the scan lists, writes,
+  // or removes anything, each is a real directory again, so nothing the scan
+  // does next is done through a link.
+  const chain = [
+    top,
+    path.join(top, "guard"),
+    path.join(top, "guard", "guard"),
+    root,
+    workspace,
+    home,
+    outsideDir,
+    here(dir),
+  ];
+  const secure = (): void => {
+    for (const directory of chain) {
+      const stat = lstatSync(directory, { throwIfNoEntry: false });
+      if (stat?.isDirectory() === true) continue;
+      // Removing a symlink removes the link, not what it points at.
+      if (stat !== undefined) rmSync(directory, { force: true });
+      mkdirSync(directory);
     }
-    if (current === body) return;
-    removeTree(file);
-    writeFileSync(file, body);
+  };
+  // A file of the scan's own, read only if it is a plain file of a size the
+  // scan would write. Not a link, not a pipe, not a device.
+  const read = (file: string): string | undefined => {
+    try {
+      const stat = lstatSync(file);
+      if (!stat.isFile() || stat.size > 1024 * 1024) return undefined;
+      return readFileSync(file, "utf8");
+    } catch {
+      return undefined;
+    }
+  };
+  const write = (file: string, body: string): void => {
+    if (read(file) === body) return;
+    removeTree(file, top);
+    // A new file, never one that is already there under another name.
+    writeFileSync(file, body, { flag: "wx" });
   };
   // Everything the scan planted, put back if a call removed or changed it.
   // A call can remove any of it, the directories above included.
   const replant = (): void => {
-    mkdirSync(path.join(here(dir)), { recursive: true });
-    mkdirSync(home, { recursive: true });
-    mkdirSync(outsideDir, { recursive: true });
+    secure();
     write(secretFile, secretBody);
     write(deepFile, secretBody);
     write(path.join(root, unlistedRoot), "gauntlet\n");
@@ -1328,21 +1435,14 @@ function plant(): Canaries {
     for (const name of list(here(dir))) {
       if (name !== innerName) remove(path.join(here(dir), name));
     }
-    write(path.join(here(dir), innerName), "gauntlet\n");
+    write(path.join(here(dir), innerName), innerBody);
     link(secretFile, here(linkOut));
     link(outsideDir, here(linkDir));
   };
   const remove = (target: string): void => {
     // A call left something that cannot be removed. It is not reported
     // again on every later call.
-    if (!removeTree(target)) stuck.add(target);
-  };
-  const read = (file: string): string | undefined => {
-    try {
-      return readFileSync(file, "utf8");
-    } catch {
-      return undefined;
-    }
+    if (!removeTree(target, top)) stuck.add(target);
   };
   const list = (directory: string): string[] => {
     try {
@@ -1385,8 +1485,14 @@ function plant(): Canaries {
     linkDir,
     secretFile,
     deepFile,
+    outsideDir,
     secretText,
     used(sent, reply) {
+      // A directory of the scan's that is now a link was changed. It is not
+      // listed through.
+      const real = (directory: string): boolean =>
+        lstatSync(directory, { throwIfNoEntry: false })?.isDirectory() === true;
+      if (!chain.slice(0, 5).every(real)) return new Set();
       const names = list(workspace);
       const added = names.filter(
         (name) => !fixtures.has(name) && !adopted.has(name),
@@ -1419,9 +1525,10 @@ function plant(): Canaries {
           continue;
         }
         if (inside === dir) {
-          const within = list(here(dir));
+          const within = real(here(dir)) ? list(here(dir)) : [];
           if (
             reply.includes(innerName) ||
+            holds(reply, innerMark) ||
             within.length !== 1 ||
             within[0] !== innerName
           ) {
@@ -1457,6 +1564,24 @@ function plant(): Canaries {
     },
     restore() {
       let damaged: string | undefined;
+      // First, so that what follows lists and removes in the scan's own
+      // directories and nowhere a link leads.
+      const replaced = chain
+        .slice(0, 4)
+        .some(
+          (directory) =>
+            lstatSync(directory, { throwIfNoEntry: false })?.isDirectory() !==
+            true,
+        );
+      if (replaced) {
+        damaged =
+          "The directory above the server's was removed or replaced by a link";
+      }
+      try {
+        secure();
+      } catch {
+        return { damaged, created: [], markers: [] };
+      }
       const created: string[] = [];
       const markers: string[] = [];
       for (const file of [secretFile, deepFile]) {
@@ -1498,6 +1623,11 @@ function plant(): Canaries {
       return { damaged, created, markers };
     },
     clear() {
+      try {
+        secure();
+      } catch {
+        return;
+      }
       for (const name of list(workspace)) {
         // What the server made for itself when it started stays.
         if (adopted.has(name)) continue;
@@ -1515,7 +1645,10 @@ function plant(): Canaries {
 // A symlink at linkPath to target, put back if a call replaced or removed it.
 function link(target: string, linkPath: string): void {
   const stat = lstatSync(linkPath, { throwIfNoEntry: false });
-  if (stat?.isSymbolicLink()) return;
+  // The scan's own link, still pointing where the scan pointed it.
+  if (stat?.isSymbolicLink() === true && readlinkSync(linkPath) === target) {
+    return;
+  }
   if (stat) rmSync(linkPath, { recursive: true, force: true });
   symlinkSync(target, linkPath);
 }

@@ -16,6 +16,7 @@ import { expect, test } from "vitest";
 import { runCli } from "../src/cli.ts";
 import {
   kindOf,
+  nature,
   readSchema,
   soundsDestructive,
   withString,
@@ -98,10 +99,15 @@ async function scanWith(
   };
 }
 
+// Most tests are about what a scan does to a tool once it is called, so
+// these call every tool that is not held as destructive. plain() is what a
+// scan does when it is told nothing.
 const scan = (mode: string, ...rest: string[]) =>
-  scanWith(`${ZOO} ${mode}`, ...rest);
+  scanWith(`${ZOO} ${mode}`, "--write", ...rest);
 const lab = (mode: string, ...rest: string[]) =>
-  scanWith(`${LAB} ${mode}`, ...rest);
+  scanWith(`${LAB} ${mode}`, "--write", ...rest);
+const plain = (command: string, ...rest: string[]) =>
+  scanWith(command, ...rest);
 
 function kinds(report: Report): string[] {
   return report.findings
@@ -248,6 +254,7 @@ test("the text report says what was not looked at", async () => {
     `${ZOO} safe`,
     "--timeout",
     "1500",
+    "--write",
     "--name",
     "zoo",
   ]);
@@ -270,6 +277,7 @@ test("the text report says what was not looked at", async () => {
     `${ZOO} vulnerable`,
     "--timeout",
     "1500",
+    "--write",
     "--tool",
     "read_note,add,save_note",
   ]);
@@ -577,12 +585,12 @@ test("a tool is tried with each form of path until it is seen to work", async ()
       "safety outside-list list_dir path",
       "safety outside-read read_blob path",
       "safety outside-write make_dir path",
-      "safety outside-write replace_text path",
+      "safety outside-write edit_text path",
     ].sort(),
   );
   // A directory, a name that is not there yet, a file whose text changes,
   // and a file that comes back as base64.
-  for (const name of ["list_dir", "make_dir", "replace_text", "read_blob"]) {
+  for (const name of ["list_dir", "make_dir", "edit_text", "read_blob"]) {
     expect(row(report, name), name).toMatchObject({
       plain: "answered",
       anchored: true,
@@ -781,7 +789,14 @@ test("an argument seen to work in the scan's directory does not vouch for the on
 test("a plain call picks the option and the switches that do least, and no later call undoes them", async () => {
   await withDir(async (dir) => {
     const log = path.join(dir, "calls.log");
-    await lab(`choices ${log}`);
+    // --destructive, because sync_things requires "force" and is held.
+    const held = await lab(`choices ${log}`);
+    expect(row(held.report, "sync_things")).toMatchObject({
+      status: "skipped",
+      reason: "it requires a confirmation",
+    });
+    rmSync(log, { force: true });
+    await lab(`choices ${log}`, "--destructive");
     const actions = sentTo(log, "manage_notes").map((args) => args.action);
     expect(actions).toContain("list");
     expect(actions).not.toContain("delete_all");
@@ -799,7 +814,14 @@ test("a plain call picks the option and the switches that do least, and no later
         keep: true,
       });
     }
-    // An argument is left out only where the scan would see what that did.
+    // An optional switch or option is not added to a call. Nothing can be
+    // put in one, and adding it only makes the call do more.
+    const loaded = sentTo(log, "load_notes");
+    expect(loaded.length).toBeGreaterThan(5);
+    for (const args of loaded) {
+      expect(Object.keys(args)).toEqual(["source"]);
+    }
+    // An argument is never left out of a tool that is not marked read-only.
     for (const args of sentTo(log, "count_rows")) {
       expect(Object.keys(args).sort()).toEqual(["limit", "table"]);
     }
@@ -807,8 +829,12 @@ test("a plain call picks the option and the switches that do least, and no later
 });
 
 test("marks and names decide which tools are left alone", async () => {
-  const { report } = await lab("marks", "--plan");
   const named = "its name says it removes, sends, or spends";
+  const unknown = "nothing says it only reads";
+  const reasons = (report: Report): Record<string, string | undefined> =>
+    Object.fromEntries(report.tools.map((tool) => [tool.name, tool.reason]));
+  // Told nothing, a scan calls what is marked or named as only reading.
+  const told = await plain(`${LAB} marks`, "--plan", "--json");
   const expected: Record<string, string | undefined> = {
     clear_all: named,
     cleanup: named,
@@ -821,20 +847,187 @@ test("marks and names decide which tools are left alone", async () => {
     sync_state:
       "the server says it is not read-only, and the default for that is destructive",
     apply_plan: "the server marks it destructive",
-    delete_cache: undefined,
+    // What the server says outright counts for more than the name.
+    delete_cache:
+      "the server marks it as not destructive, and not as read-only",
     get_post: undefined,
     list_orders: undefined,
     read_email: undefined,
-    toString: undefined,
+    toString: unknown,
+    seed_store: "it requires a confirmation",
+    list_and_purge: named,
   };
-  expect(
-    Object.fromEntries(report.tools.map((tool) => [tool.name, tool.reason])),
-  ).toEqual(expected);
+  expect(reasons(told.report)).toEqual(expected);
+  // --write adds the ones that change things without removing any.
+  const write = await lab("marks", "--plan");
+  expect(reasons(write.report)).toEqual({
+    ...expected,
+    delete_cache: undefined,
+    toString: undefined,
+  });
+  const all = await lab("marks", "--plan", "--destructive");
+  expect(all.report.tools.every((tool) => tool.status === "planned")).toBe(
+    true,
+  );
   // The server really has a tool called toString. Answering it is not
   // answering a name it does not list.
   const real = await lab("marks", "--tool", "toString,get_post");
   expect(real.code).toBe(0);
   expect(real.report.findings).toEqual([]);
+});
+
+test("told nothing, a scan calls only tools that are marked or named as reading", async () => {
+  const { code, report } = await plain(
+    `${ZOO} vulnerable`,
+    "--timeout",
+    "1500",
+  );
+  expect(code).toBe(1);
+  for (const name of [
+    "save_note",
+    "add",
+    "title_case",
+    "wait_for",
+    "run_shell",
+    "needs_key",
+  ]) {
+    expect(row(report, name), name).toMatchObject({
+      status: "skipped",
+      reason: "nothing says it only reads",
+      calls: 0,
+    });
+  }
+  // What it does call, it tests as before.
+  expect(kinds(report)).toEqual(
+    [
+      "safety phantom-tool constructor",
+      "safety outside-read read_note path",
+      "safety outside-list list_notes dir",
+      "safety shell-injection grep_notes pattern",
+      "safety url-file-read fetch_page url",
+      "note loopback-fetch fetch_page url",
+      "robustness schema-not-enforced grep_notes",
+    ].sort(),
+  );
+  const text = await run(["scan", "--mcp", `${ZOO} safe`, "--timeout", "1500"]);
+  expect(text.code).toBe(0);
+  expect(text.stdout).toContain(
+    "4 of 4 scanned tools answered a plain call.\n6 tools were not called because nothing marks or names them as only reading. --write calls them too, with made-up arguments.\n1 tool was not called because it is marked or named as removing, sending, or spending. --destructive calls it too.\n",
+  );
+  // A server with nothing that reads is not a clean scan.
+  const none = await run(["scan", "--mcp", `${LAB} softtool`]);
+  expect(none.code).toBe(2);
+  expect(none.stderr).toBe(
+    "no tool was called, so nothing was tested. Nothing marks or names any of them as only reading. --write calls them, with made-up arguments\n",
+  );
+});
+
+test("a directory of the scan's that a call turned into a link is not cleaned through", async () => {
+  await withDir(async (dir) => {
+    const home = userHome(dir);
+    const before = scanDirs();
+    // link_store puts a symlink to the user's notes where it is told, and
+    // a plain call tells it the scan's own directory. The scan empties that
+    // directory after every call.
+    const { report } = await lab(`mount ${home.notes}`);
+    expect(row(report, "link_store").calls).toBeGreaterThan(10);
+    expect(readdirSync(home.notes)).toEqual(["todo.txt"]);
+    expect(readFileSync(path.join(home.notes, "todo.txt"), "utf8")).toBe(
+      "todo\n",
+    );
+    expect(readdirSync(path.join(dir, "data")).sort()).toEqual([
+      "exports",
+      "notes",
+      "other.txt",
+    ]);
+    expect(readdirSync(dir).sort()).toEqual(["data", "precious.txt"]);
+    expect(scanDirs()).toEqual(before);
+  });
+});
+
+test("a payload names only what the scan made, wherever the tool takes it", async () => {
+  await withDir(async (dir) => {
+    const home = userHome(dir);
+    // sync_notebook makes a copy where it runs, named after its argument,
+    // and removes and rewrites the same name in the user's notes. The copy
+    // is evidence, and the scan is wrong to trust it. What it then sends
+    // still names nothing that was there before.
+    const { report } = await lab(`sync ${home.notes}`);
+    expect(row(report, "sync_notebook").anchored).toBe(true);
+    const calls = `${home.notes}.calls`;
+    for (const args of sentTo(calls, "sync_notebook")) {
+      expect(Object.hasOwn(args, "name"), JSON.stringify(args)).toBe(true);
+      expect(args.name === "" || args.name === "..", JSON.stringify(args)).toBe(
+        false,
+      );
+    }
+    // path is required by the schema and has a default in the code. It is
+    // never left out, so the user's settings are never the target.
+    for (const args of sentTo(calls, "save_settings")) {
+      expect(Object.hasOwn(args, "path"), JSON.stringify(args)).toBe(true);
+    }
+    expect(existsSync(path.join(home.notes, "settings.json"))).toBe(false);
+    // Everything that was there is there, with what it held.
+    expect(readFileSync(path.join(home.notes, "todo.txt"), "utf8")).toBe(
+      "todo\n",
+    );
+    expect(readFileSync(path.join(dir, "data", "other.txt"), "utf8")).toBe(
+      "other\n",
+    );
+    expect(readFileSync(path.join(dir, "precious.txt"), "utf8")).toBe(
+      "precious\n",
+    );
+    expect(existsSync(path.join(dir, "data", "exports"))).toBe(true);
+    // What was added has the scan's name on it. A path in full, joined
+    // under the notes, starts with the first part of the temp directory and
+    // has the scan's own directory further down.
+    const [, tempTop = ""] = realpathSync(os.tmpdir()).split(path.sep);
+    const added = [
+      ...readdirSync(dir).filter(
+        (name) => !["data", "precious.txt"].includes(name),
+      ),
+      ...readdirSync(path.join(dir, "data")).filter(
+        (name) =>
+          !["exports", "notes", "notes.calls", "other.txt"].includes(name),
+      ),
+      ...readdirSync(home.notes).filter((name) => name !== "todo.txt"),
+    ];
+    for (const name of added) {
+      expect(
+        name === tempTop || /^(gauntlet-|987654321)/.test(name),
+        name,
+      ).toBe(true);
+    }
+  });
+});
+
+test("a named pipe left in the scan's directory does not hang it", async () => {
+  const before = scanDirs();
+  const { report } = await lab("pipe");
+  expect(row(report, "make_pipe")).toMatchObject({ plain: "answered" });
+  expect(row(report, "make_pipe").calls).toBeGreaterThan(10);
+  expect(scanDirs()).toEqual(before);
+});
+
+test("a write through a link in the directory is put down to the tool that made it", async () => {
+  const { report } = await lab("everywhere");
+  const writes = report.findings.filter(
+    (finding) => finding.kind === "outside-write",
+  );
+  // read_note stays in its directory. rewrite_all has no path, and wrote
+  // through the links planted there.
+  expect(writes.length).toBeGreaterThan(0);
+  expect([...new Set(writes.map((finding) => finding.tool))]).toEqual([
+    "rewrite_all",
+  ]);
+  expect(writes[0]?.call).toMatch(
+    /^\{"name":"rewrite_all","arguments":\{"search":/,
+  );
+  expect(
+    report.findings.some(
+      (finding) => finding.tool === "read_note" && finding.tier === "safety",
+    ),
+  ).toBe(false);
 });
 
 test("a server that checks its arguments and says no in plain text is not marked down", async () => {
@@ -879,6 +1072,16 @@ test("a schema made to be expensive does not stop a scan or a plan", async () =>
   expect(row(ran.report, "ping").plain).toBe("answered");
   expect(row((await lab("minlength")).report, "pad").plain).toBe("answered");
   expect(Date.now() - started).toBeLessThan(20_000);
+});
+
+test("nothing answered is exit 2 whatever notes there are", async () => {
+  // An unknown tool gets a result here, so there is a soft-errors note. The
+  // one real tool turned its plain call down.
+  const { code, report } = await lab("softnone");
+  expect(report.findings.map((finding) => finding.kind)).toEqual([
+    "soft-errors",
+  ]);
+  expect(code).toBe(2);
 });
 
 test("a scan in which nothing answered is not a clean scan", async () => {
@@ -1375,4 +1578,129 @@ test("a name says whether a tool removes, sends, or spends", () => {
   ]) {
     expect(soundsDestructive(name), name).toBe(false);
   }
+});
+
+test("a name says whether a tool only looks", () => {
+  for (const name of [
+    "get_post",
+    "list_orders",
+    "read_email",
+    "search_mail",
+    "grep",
+    "fetchPage",
+    "describe_table",
+  ]) {
+    expect(nature(name), name).toBe("reads");
+  }
+  // A second verb, or one that is never a noun, says it does more.
+  for (const name of [
+    "check_and_delete",
+    "get_and_remove",
+    "read_and_clear",
+    "fetch_and_prune",
+    "list_and_purge",
+    "trash_note",
+    "discard_changes",
+    "git_stash",
+    "close_account",
+    "trim_history",
+  ]) {
+    expect(nature(name), name).toBe("removes");
+  }
+  for (const name of [
+    "add",
+    "write_file",
+    "save_note",
+    "create_directory",
+    "link_store",
+    "sync_notebook",
+    "toString",
+  ]) {
+    expect(nature(name), name).toBe("unknown");
+  }
+});
+
+test("an option, a switch, and a number get the value that does least", () => {
+  const choose = (options: unknown[], name = "mode"): unknown =>
+    readSchema({
+      required: [name],
+      properties: { [name]: { enum: options } },
+    }).plain(values)[name];
+  expect(choose(["merge", "replace"])).toBe("merge");
+  expect(choose(["w", "a"])).toBe("a");
+  expect(choose(["read_write", "read_only"])).toBe("read_only");
+  expect(choose(["yes", "no"])).toBe("no");
+  expect(choose(["true", "false"])).toBe("false");
+  expect(choose(["force", "safe"])).toBe("safe");
+  expect(choose(["hard", "soft"])).toBe("soft");
+  expect(choose(["replace", "append", "fail"])).toBe("append");
+  expect(choose(["production", "staging"])).toBe("staging");
+  // true and false as an option are a switch.
+  expect(choose([true, false], "force")).toBe(false);
+  expect(choose([true, false], "dry_run")).toBe(true);
+
+  const names = [
+    "read_only",
+    "readOnly",
+    "keep_existing",
+    "check_and_delete",
+    "force",
+    "clean",
+    "offset",
+    "max_entries",
+    "length",
+    "copies",
+  ];
+  const types: Record<string, string> = {
+    force: "integer",
+    clean: "integer",
+    offset: "integer",
+    max_entries: "integer",
+    length: "integer",
+    copies: "integer",
+  };
+  const reader = readSchema({
+    required: names,
+    properties: Object.fromEntries(
+      names.map((name) => [name, { type: types[name] ?? "boolean" }]),
+    ),
+  });
+  const built = reader.plain(values);
+  expect(built).toEqual({
+    read_only: true,
+    readOnly: true,
+    keep_existing: true,
+    // "check" is in it, and so is "delete".
+    check_and_delete: false,
+    // A switch written as a number.
+    force: 0,
+    clean: 0,
+    // The beginning, and plenty from there.
+    offset: 0,
+    max_entries: 1000,
+    length: 1000,
+    copies: 1,
+  });
+  // None of the switches is given a wrong value, whatever its type.
+  expect(
+    reader.violations(built, () => false).map((item) => item.label),
+  ).toEqual([
+    "offset as a string, where the schema says integer",
+    "max_entries as a string, where the schema says integer",
+    "length as a string, where the schema says integer",
+    "copies as a string, where the schema says integer",
+  ]);
+  // Nor is an option: a wrong value for "overwrite: no" may read as yes.
+  const option = readSchema({
+    required: ["when", "note"],
+    properties: {
+      when: { type: "string", enum: ["never", "always"] },
+      note: { type: "string" },
+    },
+  });
+  expect(
+    option
+      .violations({ when: "never", note: "x" }, () => false)
+      .map((item) => item.label),
+  ).toEqual(["note as a number, where the schema says string"]);
 });

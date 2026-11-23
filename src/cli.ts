@@ -21,7 +21,12 @@ import {
 } from "./format.ts";
 import { runAll } from "./run.ts";
 import { formatSarif } from "./sarif.ts";
-import { formatScan, formatScanJson, scanTotals } from "./scan/report.ts";
+import {
+  formatScan,
+  formatScanJson,
+  heldCounts,
+  scanTotals,
+} from "./scan/report.ts";
 import { type ScanReport, ScanUsageError, scanMcp } from "./scan/scan.ts";
 import { scenarios } from "./scenarios/index.ts";
 import { printable } from "./text.ts";
@@ -79,8 +84,11 @@ scan options:
   --tool <name>              scan only this tool. Repeat it, or separate names with commas
   --skip <name>              leave this tool out
   --plan                     list what would be called and why, and call nothing
+  --write                    also call tools that nothing marks or names as only reading.
+                             Without it a scan calls get_, list_, read_, search_ and the
+                             like, and tools the server marks read-only
   --destructive              also call tools marked or named as removing, sending, or
-                             spending. Without it they are left alone
+                             spending. It includes --write
   --env <NAME[=value]>       give the server this variable. It gets PATH, LANG, a temp HOME,
                              and no other variable of yours, unless you name it
   --ignore <kind[:tool]>     leave findings of this kind out of the report and the exit code
@@ -319,6 +327,7 @@ async function scanCommand(
   let maxCalls = DEFAULT_SCAN_CALLS;
   let json = false;
   let destructive = false;
+  let write = false;
   let planOnly = false;
   let failOn: "any" | "safety" | "robustness" | "none" = "any";
   const only: string[] = [];
@@ -351,6 +360,10 @@ async function scanCommand(
     }
     if (token === "--destructive") {
       destructive = true;
+      continue;
+    }
+    if (token === "--write") {
+      write = true;
       continue;
     }
     if (token === "--plan") {
@@ -421,6 +434,7 @@ async function scanCommand(
       ignored: ignore.flatMap((rule) =>
         rule.tool === undefined ? [] : [rule.tool],
       ),
+      write: write || destructive,
       destructive,
       env,
       maxCallsPerTool: maxCalls,
@@ -455,17 +469,6 @@ async function scanCommand(
     );
   }
   if (planOnly) return 0;
-  // A scan in which no tool gave a result for a plain call tested nothing.
-  // That is not a clean scan, and it does not exit as one.
-  const exercised = kept.tools.some(
-    (row) => row.status === "scanned" && row.plain === "answered",
-  );
-  if (!exercised && findings.length === 0 && failOn !== "none") {
-    stderr.write(
-      "no tool answered a plain call, so nothing was tested. A tool may need a variable from --env, or the server may want arguments on its command line\n",
-    );
-    return 2;
-  }
   const totals = scanTotals(findings);
   const bad =
     failOn === "none"
@@ -473,7 +476,25 @@ async function scanCommand(
       : failOn === "any"
         ? totals.safety + totals.robustness
         : totals[failOn];
-  return bad > 0 ? 1 : 0;
+  if (bad > 0) return 1;
+  // A scan in which no tool gave a result for a plain call tested nothing.
+  // That is not a clean scan, and it does not exit as one.
+  const exercised = kept.tools.some(
+    (row) => row.status === "scanned" && row.plain === "answered",
+  );
+  if (!exercised && failOn !== "none") {
+    const called = kept.tools.some((row) => row.status === "scanned");
+    const held = heldCounts(kept);
+    stderr.write(
+      called
+        ? "no tool answered a plain call, so nothing was tested. A tool may need a variable from --env, or the server may want arguments on its command line\n"
+        : held.writes > 0
+          ? "no tool was called, so nothing was tested. Nothing marks or names any of them as only reading. --write calls them, with made-up arguments\n"
+          : "no tool was called, so nothing was tested\n",
+    );
+    return 2;
+  }
+  return 0;
 }
 
 function listCommand(

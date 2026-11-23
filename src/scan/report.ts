@@ -5,6 +5,7 @@ import {
   type FindingTier,
   HELD,
   type ScanReport,
+  WRITES,
 } from "./scan.ts";
 
 // What to change, one line for each kind of finding.
@@ -79,6 +80,7 @@ export function formatScan(report: ScanReport): string {
     const planned = report.tools.filter((tool) => tool.status === "planned");
     lines.push(
       `${planned.length} of ${report.tools.length} tools would be called. No tool was called.`,
+      ...heldLines(report),
     );
     return `${lines.join("\n")}\n`;
   }
@@ -149,15 +151,7 @@ export function formatScan(report: ScanReport): string {
       `No finding means little for ${quiet === scanned.length ? "them" : `the other ${quiet}`}: a tool that turns every call down gives nothing to find.`,
     );
   }
-  const reasons: readonly string[] = Object.values(HELD);
-  const held = report.tools.filter(
-    (tool) => tool.reason !== undefined && reasons.includes(tool.reason),
-  );
-  if (held.length > 0) {
-    lines.push(
-      `${held.length} ${held.length === 1 ? "tool was" : "tools were"} not called because ${held.length === 1 ? "it is" : "they are"} marked or named as removing, sending, or spending. --destructive calls ${held.length === 1 ? "it" : "them"} too.`,
-    );
-  }
+  lines.push(...heldLines(report));
   if (report.stopped !== undefined) {
     lines.push(`The scan ended early: ${clean(report.stopped)}.`);
   }
@@ -167,6 +161,38 @@ export function formatScan(report: ScanReport): string {
     );
   }
   return `${lines.join("\n")}\n`;
+}
+
+// How many tools were left alone for what they might do, and the flag that
+// calls them.
+export function heldCounts(report: ScanReport): {
+  writes: number;
+  destructive: number;
+} {
+  const count = (reasons: readonly string[]): number =>
+    report.tools.filter(
+      (tool) => tool.reason !== undefined && reasons.includes(tool.reason),
+    ).length;
+  return {
+    writes: count(Object.values(WRITES)),
+    destructive: count(Object.values(HELD)),
+  };
+}
+
+function heldLines(report: ScanReport): string[] {
+  const { writes, destructive } = heldCounts(report);
+  const lines: string[] = [];
+  if (writes > 0) {
+    lines.push(
+      `${writes} ${writes === 1 ? "tool was" : "tools were"} not called because nothing marks or names ${writes === 1 ? "it" : "them"} as only reading. --write calls ${writes === 1 ? "it" : "them"} too, with made-up arguments.`,
+    );
+  }
+  if (destructive > 0) {
+    lines.push(
+      `${destructive} ${destructive === 1 ? "tool was" : "tools were"} not called because ${destructive === 1 ? "it is" : "they are"} marked or named as removing, sending, or spending. --destructive calls ${destructive === 1 ? "it" : "them"} too.`,
+    );
+  }
+  return lines;
 }
 
 export function formatScanJson(report: ScanReport): string {
