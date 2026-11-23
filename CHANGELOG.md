@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The README's action examples pin `v0.3.0`.
+
 ## 0.3.0
 
 `gauntlet scan` tests any MCP server, with no adapter and no fixed list of tools. It reads the tools the server lists and the schema of each one, and makes its calls from those. The fixed suite of 28 scenarios, `gauntlet run`, is unchanged.
