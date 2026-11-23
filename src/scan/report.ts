@@ -23,6 +23,8 @@ const FIX: Readonly<Record<FindingKind, string>> = {
     "Check the arguments against the schema the tool publishes before running it.",
   "loopback-fetch":
     "If the server can run where other services are reachable, refuse loopback and private addresses.",
+  "soft-errors":
+    "Answer a call that failed with isError, or with a JSON-RPC error, so a client can tell it from one that worked.",
 };
 
 const TIERS: readonly FindingTier[] = ["safety", "robustness", "note"];
@@ -41,18 +43,37 @@ export function formatScan(report: ScanReport): string {
     `server: ${clean(report.server)}`,
     "",
   ];
-  const rows = report.tools.map((tool) => [
-    clean(tool.name),
-    tool.status,
-    tool.status === "skipped" ? "-" : String(tool.calls),
-    tool.status === "skipped" ? "-" : tool.answered ? "answered" : "refused",
-    tool.status === "skipped" ? "-" : String(tool.findings),
-    tool.reason ?? "",
-  ]);
+  const rows = report.tools.map((tool) => {
+    const quiet = tool.status !== "scanned";
+    return [
+      clean(tool.name),
+      tool.status,
+      quiet ? "-" : String(tool.calls),
+      quiet ? "-" : tool.plain,
+      tool.status === "skipped" ? "-" : String(tool.strings),
+      quiet ? "-" : String(tool.findings),
+      clean(tool.reason ?? ""),
+    ];
+  });
   lines.push(
-    table(rows, ["tool", "status", "calls", "plain call", "findings", ""]),
+    table(rows, [
+      "tool",
+      "status",
+      "calls",
+      "plain call",
+      "strings",
+      "findings",
+      "",
+    ]),
     "",
   );
+  if (report.tools.some((tool) => tool.status === "planned")) {
+    const planned = report.tools.filter((tool) => tool.status === "planned");
+    lines.push(
+      `${planned.length} of ${report.tools.length} tools would be called. No tool was called.`,
+    );
+    return `${lines.join("\n")}\n`;
+  }
   const ordered = [...report.findings].sort(
     (left, right) => TIERS.indexOf(left.tier) - TIERS.indexOf(right.tier),
   );
@@ -110,24 +131,28 @@ export function formatScan(report: ScanReport): string {
     `${totals.safety} safety, ${totals.robustness} robustness, ${totals.note} ${totals.note === 1 ? "note" : "notes"}.`,
   );
   const scanned = report.tools.filter((tool) => tool.status === "scanned");
-  const quiet = scanned.filter((tool) => !tool.answered);
-  if (scanned.length > 0) {
-    lines.push(
-      `${scanned.length - quiet.length} of ${scanned.length} scanned tools answered a plain call.`,
-    );
-  }
-  const marked = report.tools.filter(
-    (tool) => tool.reason === "the server marks it destructive",
+  const answered = scanned.filter((tool) => tool.plain === "answered");
+  const quiet = scanned.length - answered.length;
+  lines.push(
+    `${answered.length} of ${scanned.length} scanned ${scanned.length === 1 ? "tool" : "tools"} answered a plain call.`,
   );
-  if (marked.length > 0) {
+  if (quiet > 0) {
     lines.push(
-      `${marked.length} ${marked.length === 1 ? "tool was" : "tools were"} not called because the server marks ${marked.length === 1 ? "it" : "them"} destructive. --destructive calls ${marked.length === 1 ? "it" : "them"} too.`,
+      `No finding means little for ${quiet === scanned.length ? "them" : `the other ${quiet}`}: a tool that turns every call down gives nothing to find.`,
     );
   }
-  if (quiet.length > 0) {
+  const held = report.tools.filter(
+    (tool) =>
+      tool.reason === "the server marks it destructive" ||
+      tool.reason === "its name says it removes, sends, or spends",
+  );
+  if (held.length > 0) {
     lines.push(
-      `No finding means little for the other ${quiet.length}: a server that turns every call down gives nothing to find.`,
+      `${held.length} ${held.length === 1 ? "tool was" : "tools were"} not called because ${held.length === 1 ? "it is" : "they are"} marked or named as removing, sending, or spending. --destructive calls ${held.length === 1 ? "it" : "them"} too.`,
     );
+  }
+  if (report.stopped !== undefined) {
+    lines.push(`The scan ended early: ${clean(report.stopped)}.`);
   }
   return `${lines.join("\n")}\n`;
 }

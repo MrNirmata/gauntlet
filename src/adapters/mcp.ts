@@ -37,6 +37,19 @@ type Pending = {
   timer: NodeJS.Timeout;
 };
 
+// Why a request to the server did not get an answer. A caller that has to
+// tell a server that exited from one Gauntlet stopped reads the kind, not
+// the wording of the message.
+export type McpFailureKind = "exit" | "timeout" | "oversize" | "stopped";
+
+export class McpFailure extends Error {
+  readonly kind: McpFailureKind;
+  constructor(kind: McpFailureKind, message: string) {
+    super(message);
+    this.kind = kind;
+  }
+}
+
 // A tool as the server lists it. inputSchema is whatever the server sent.
 export type McpTool = {
   readonly name: string;
@@ -75,7 +88,12 @@ export function openMcpSession(
 }
 
 // The text of a tools/call result, and whether the server marked it an error.
-export function readMcpResult(reply: McpReply): {
+// withData also returns what an image, audio, or binary resource block
+// carries, as the base64 the server sent.
+export function readMcpResult(
+  reply: McpReply,
+  withData = false,
+): {
   text: string;
   failed: boolean;
 } {
@@ -84,7 +102,7 @@ export function readMcpResult(reply: McpReply): {
   }
   const result = reply.result;
   return {
-    text: resultText(result),
+    text: resultText(result, withData),
     failed: isRecord(result) && result.isError === true,
   };
 }
@@ -347,7 +365,7 @@ function toRunOutput(reply: Reply, call: ToolCall): RunOutput {
 // Text from every block that carries some: a text block, and a resource
 // block with the file embedded. A reply with only structuredContent is
 // printed as JSON.
-function resultText(result: unknown): string {
+function resultText(result: unknown, withData = false): string {
   if (!isRecord(result)) return "";
   const parts: string[] = [];
   if (Array.isArray(result.content)) {
@@ -361,6 +379,14 @@ function resultText(result: unknown): string {
         typeof block.resource.text === "string"
       ) {
         parts.push(block.resource.text);
+      } else if (!withData) {
+      } else if (typeof block.data === "string") {
+        parts.push(block.data);
+      } else if (
+        isRecord(block.resource) &&
+        typeof block.resource.blob === "string"
+      ) {
+        parts.push(block.resource.blob);
       }
     }
   }
@@ -408,12 +434,14 @@ async function startSession(
   let nextId = 1;
   let ended: string | undefined;
 
-  const end = (reason: string): void => {
+  let endedAs: McpFailureKind = "exit";
+  const end = (reason: string, kind: McpFailureKind = "exit"): void => {
     if (ended !== undefined) return;
     ended = reason;
+    endedAs = kind;
     for (const waiting of pending.values()) {
       clearTimeout(waiting.timer);
-      waiting.reject(new Error(reason));
+      waiting.reject(new McpFailure(kind, reason));
     }
     pending.clear();
   };
@@ -485,7 +513,10 @@ async function startSession(
     drain();
     if (buffer.length > MAX_BUFFER_CHARS) {
       killGroup(child);
-      end(`mcp server sent a message over ${MAX_BUFFER_CHARS} bytes`);
+      end(
+        `mcp server sent a message over ${MAX_BUFFER_CHARS} bytes`,
+        "oversize",
+      );
     }
   });
   // A last message with no newline after it is still a message.
@@ -533,7 +564,7 @@ async function startSession(
   // the sandbox, so this waits for it to be gone before the sandbox is
   // deleted, but not for long.
   const stop = async (): Promise<void> => {
-    end("mcp server stopped");
+    end("mcp server stopped", "stopped");
     stdin.end();
     await wait(POLITE_STOP_MS);
     killGroup(child);
@@ -545,7 +576,9 @@ async function startSession(
   };
 
   const request = (method: string, paramsJson?: string): Promise<Reply> => {
-    if (ended !== undefined) return Promise.reject(new Error(ended));
+    if (ended !== undefined) {
+      return Promise.reject(new McpFailure(endedAs, ended));
+    }
     const id = nextId;
     nextId += 1;
     return new Promise<Reply>((resolve, reject) => {
@@ -553,8 +586,13 @@ async function startSession(
         pending.delete(id);
         // A server that did not answer one request is not asked another.
         killGroup(child);
-        end(`mcp ${method} timed out after ${timeoutMs}ms`);
-        reject(new Error(`mcp ${method} timed out after ${timeoutMs}ms`));
+        end(`mcp ${method} timed out after ${timeoutMs}ms`, "timeout");
+        reject(
+          new McpFailure(
+            "timeout",
+            `mcp ${method} timed out after ${timeoutMs}ms`,
+          ),
+        );
       }, timeoutMs);
       pending.set(id, { resolve, reject, timer });
       const params = paramsJson === undefined ? "" : `,"params":${paramsJson}`;

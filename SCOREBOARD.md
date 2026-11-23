@@ -120,41 +120,70 @@ The server also defends against one thing no scenario here can test. Its source 
 
 ### Scanned
 
-The same package under `gauntlet scan`, which calls every tool and not only the two that read and write. Run on 2026-11-23 on macOS with Node 25.9.
+The same package under `gauntlet scan`, which calls the tools the server lists and not only the two that read and write. Run on 2026-11-23 on macOS with Node 25.9.
 
 ```
-node dist/cli.js scan --mcp "node <path>/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js {workspace}" --destructive
+node dist/cli.js scan --mcp "node <path>/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js {workspace}" --name server-filesystem@2.4.0
 ```
 
 ```
 scan: server-filesystem@2.4.0
 server: secure-filesystem-server 2.4.0
 
-tool                       status   calls  plain call  findings
-read_file                  scanned  27     answered    0
-read_text_file             scanned  27     answered    0
-read_media_file            scanned  27     answered    0
-read_multiple_files        scanned  27     answered    0
-write_file                 scanned  53     answered    0
-append_file                scanned  53     answered    0
-edit_file                  scanned  77     answered    0
-create_directory           scanned  28     answered    0
-list_directory             scanned  28     answered    0
-list_directory_with_sizes  scanned  28     answered    0
-directory_tree             scanned  52     answered    0
-move_file                  scanned  53     answered    0
-copy_file                  scanned  53     answered    0
-search_files               scanned  78     answered    0
-get_file_info              scanned  27     answered    0
-list_allowed_directories   scanned  1      answered    0
+tool                       status   calls  plain call  strings  findings
+read_file                  scanned  26     answered    1        0
+read_text_file             scanned  26     answered    1        0
+read_media_file            scanned  26     answered    1        0
+read_multiple_files        scanned  26     answered    1        0
+write_file                 skipped  -      -           -        -         the server marks it destructive
+append_file                scanned  51     answered    2        0
+edit_file                  skipped  -      -           -        -         the server marks it destructive
+create_directory           scanned  28     answered    1        0
+list_directory             scanned  27     answered    1        0
+list_directory_with_sizes  scanned  27     answered    1        0
+directory_tree             scanned  50     answered    2        0
+move_file                  skipped  -      -           -        -         the server marks it destructive
+copy_file                  scanned  51     answered    2        0
+search_files               scanned  47     answered    3        0         paths that leave a directory were not sent: the plain call was not seen to work in the scan's directory
+get_file_info              scanned  20     answered    1        0         paths that leave a directory were not sent: the plain call was not seen to work in the scan's directory
+list_allowed_directories   scanned  1      answered    0        0         it publishes no arguments, so only a plain call was made
+
+0 safety, 0 robustness, 0 notes.
+13 of 13 scanned tools answered a plain call.
+3 tools were not called because they are marked or named as removing, sending, or spending. --destructive calls them too.
+```
+
+The server marks `write_file`, `edit_file`, and `move_file` destructive, so a scan leaves them alone. With `--destructive` it calls them too:
+
+```
+scan: server-filesystem@2.4.0
+server: secure-filesystem-server 2.4.0
+
+tool                       status   calls  plain call  strings  findings
+read_file                  scanned  26     answered    1        0
+read_text_file             scanned  26     answered    1        0
+read_media_file            scanned  26     answered    1        0
+read_multiple_files        scanned  26     answered    1        0
+write_file                 scanned  51     answered    2        0
+append_file                scanned  51     answered    2        0
+edit_file                  scanned  74     answered    3        0
+create_directory           scanned  28     answered    1        0
+list_directory             scanned  27     answered    1        0
+list_directory_with_sizes  scanned  27     answered    1        0
+directory_tree             scanned  50     answered    2        0
+move_file                  scanned  51     answered    2        0
+copy_file                  scanned  51     answered    2        0
+search_files               scanned  47     answered    3        0         paths that leave a directory were not sent: the plain call was not seen to work in the scan's directory
+get_file_info              scanned  20     answered    1        0         paths that leave a directory were not sent: the plain call was not seen to work in the scan's directory
+list_allowed_directories   scanned  1      answered    0        0         it publishes no arguments, so only a plain call was made
 
 0 safety, 0 robustness, 0 notes.
 16 of 16 scanned tools answered a plain call.
 ```
 
-Sixteen tools, each called with between 1 and 80 argument sets. No reply held the planted secret or the name of the planted file, nothing beside the directory changed, no injected command ran, and the server never exited or stopped answering. All 16 tools gave a result for a plain call, so the empty list is about a server that was doing its work.
+Sixteen tools, each called with between 1 and 74 argument sets. No reply held the planted secret or the name of a planted file, nothing beside the directory changed, no injected command ran, and the server never exited or stopped answering. All 16 tools gave a result for a plain call, so the empty list is about a server that was doing its work.
 
-`--destructive` is there because the server marks `write_file`, `edit_file`, and `move_file` destructive, and a scan does not call such a tool without it.
+Two rows say what was not tried. `get_file_info` returns sizes and dates, and `search_files` matched nothing with the word it was given, so neither was seen to read the scan's directory, and neither was sent a path that leaves one. The other 13 tools that take a path were.
 
 The scan does not send the Unicode names or the hard link of the fixed suite, so the five fails in the table above are not in it.
 

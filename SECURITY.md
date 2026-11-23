@@ -14,16 +14,29 @@ Point it at code you would run anyway.
 
 ## What a scan does
 
-`gauntlet scan` is different from the rest. It does not send a fixed set of calls to two file tools. It calls every tool the server lists, with arguments it made up from the tool's schema.
+`gauntlet scan` is different from the rest. It does not send a fixed set of calls to two file tools. It calls the tools the server lists, with arguments it made up from each tool's schema. `gauntlet scan --plan` lists what would be called and calls nothing.
 
-- A tool that deletes, sends, posts, or pays is asked to, unless the server marks it destructive. Most servers mark nothing.
-- The server is started in a temp directory with `PATH` and a temp `HOME` and no other variable of yours, so a tool that needs a token has none. A variable you pass with `--env` is one the server can use on anything.
-- Every path the scan sends is inside that temp directory or names a file the scan planted beside it. The commands it tries to inject only `touch` a file there. It does not send `/`, `~`, or a path of yours.
-- A server can still reach the network, and a tool that takes an absolute path can still be given one by its own defaults.
+What limits the harm of a made-up call:
 
-Scan a server whose worst case you accept, with test credentials or none. `--tool` and `--skip` choose what is called.
+- The server is started in a temp directory with `PATH`, a temp `HOME`, a temp `TMPDIR`, and no other variable of yours, so a tool that needs a token has none. A variable you pass with `--env` is one the server can use on anything.
+- A tool is left alone when the server marks it destructive or when its name says it removes, sends, or spends. `--destructive`, or naming the tool with `--tool`, calls it.
+- The names of `--tool`, `--skip`, and `--ignore` are checked against the server's list before the first call. A misspelled `--skip` does not go on to call the tool it was meant to leave out.
+- A path that leaves a directory is sent only to a tool whose plain call was seen to work in the scan's own directory. Without that, the server may keep its data somewhere else, and `../x` would be read against that place.
+- The server's directory is four levels inside the temp directory the scan made. No payload goes further than one level above it, which is still inside.
+- Every name the scan makes up starts with `gauntlet-` and eight random characters. It sends no empty string, no `/`, no `~`, and no path of yours. The commands it tries to inject only `touch` a file in its temp directory, and the path of that directory has no space or shell character in it. If the system temp directory has one, `/tmp` is used, and if that has one too the scan stops.
+- A missing required argument is sent only to a tool that takes no string, or that was seen to work in the scan's directory.
 
-A scan with no findings does not mean the server is safe. The scan tries the payloads it has, on the arguments it can see, and a tool that turned down its plain call was not exercised at all. The report says which tools those are.
+What it does not limit:
+
+- The server is your code, running as you, with your files and your network. The environment is trimmed. Nothing else is confined.
+- A tool that does harm under a name the scan does not recognise, and that the server does not mark, is called. Most servers mark nothing.
+- A server that keeps its data in a fixed place gets plain calls there. They can leave files whose names start with `gauntlet-`, or a file named `987654321`, in that place.
+- A tool that takes an id is given `987654321`. If that id exists, the call acts on it.
+- A server can still reach the network with whatever a tool does by default.
+
+Scan a server whose worst case you accept, with test credentials or none.
+
+A scan with no findings does not mean the server is safe. The scan tries the payloads it has, on the arguments it can see. A tool that turned down its plain call was not exercised, and a tool that was not seen to work in the scan's directory was not sent a path that leaves one. The report says which tools those are, and a scan in which no tool answered exits 2.
 
 ## What the sandbox is
 

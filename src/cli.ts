@@ -22,7 +22,7 @@ import {
 import { runAll } from "./run.ts";
 import { formatSarif } from "./sarif.ts";
 import { formatScan, formatScanJson, scanTotals } from "./scan/report.ts";
-import { type ScanReport, scanMcp } from "./scan/scan.ts";
+import { type ScanReport, ScanUsageError, scanMcp } from "./scan/scan.ts";
 import { scenarios } from "./scenarios/index.ts";
 import { printable } from "./text.ts";
 import type { Adapter, Category, RunOptions, Scenario, Tier } from "./types.ts";
@@ -78,9 +78,11 @@ what fails the run:
 scan options:
   --tool <name>              scan only this tool. Repeat it, or separate names with commas
   --skip <name>              leave this tool out
-  --destructive              also call tools the server marks destructive
+  --plan                     list what would be called and why, and call nothing
+  --destructive              also call tools marked or named as removing, sending, or
+                             spending. Without it they are left alone
   --env <NAME[=value]>       give the server this variable. It gets PATH and a temp HOME,
-                             and nothing else of yours, unless you name it
+                             and no other variable of yours, unless you name it
   --ignore <kind[:tool]>     leave findings of this kind out of the report and the exit code
   --fail-on <tier>           any, safety, robustness, or none
   --max-calls <n>            calls per tool. The default is 300
@@ -300,6 +302,7 @@ const SCAN_KINDS: readonly string[] = [
   "bad-reply",
   "schema-not-enforced",
   "loopback-fetch",
+  "soft-errors",
 ];
 
 async function scanCommand(
@@ -313,6 +316,7 @@ async function scanCommand(
   let maxCalls = DEFAULT_SCAN_CALLS;
   let json = false;
   let destructive = false;
+  let planOnly = false;
   let failOn: "any" | "safety" | "robustness" | "none" = "any";
   const only: string[] = [];
   const skip: string[] = [];
@@ -346,6 +350,10 @@ async function scanCommand(
       destructive = true;
       continue;
     }
+    if (token === "--plan") {
+      planOnly = true;
+      continue;
+    }
     if (!valued.has(token)) return fail(`unknown argument ${token}`);
     const value = argv[index + 1];
     if (value === undefined || value.length === 0 || value.startsWith("--")) {
@@ -376,7 +384,9 @@ async function scanCommand(
       failOn = value;
     } else if (token === "--ignore") {
       // outside-read, or outside-read:read_file for one tool only.
-      const [kind = "", tool] = value.split(":");
+      const colon = value.indexOf(":");
+      const kind = colon < 0 ? value : value.slice(0, colon);
+      const tool = colon < 0 ? undefined : value.slice(colon + 1);
       if (!SCAN_KINDS.includes(kind)) {
         return fail(`unknown finding ${kind}; one of ${SCAN_KINDS.join(", ")}`);
       }
@@ -405,37 +415,58 @@ async function scanCommand(
       destructive,
       env,
       maxCallsPerTool: maxCalls,
+      planOnly,
     });
   } catch (error) {
+    // A misspelled tool name is found before anything is called.
+    if (error instanceof ScanUsageError) return fail(error.message);
     return fail(`could not scan the MCP server: ${errorLine(error)}`);
   }
-  const unknown = [...only, ...skip].filter(
-    (tool) => !report.tools.some((row) => row.name === tool),
+  const names = report.tools.map((row) => row.name);
+  const stray = ignore.find(
+    (rule) => rule.tool !== undefined && !names.includes(rule.tool),
   );
-  if (unknown.length > 0) {
+  if (stray !== undefined) {
     return fail(
-      `the MCP server has no tool named ${unknown.join(", ")}. Its tools: ${report.tools.map((row) => row.name).join(", ")}`,
+      `--ignore names ${stray.tool}, which is not a tool of this server. Its tools: ${names.join(", ")}`,
     );
   }
-  const kept = {
+  const keep = (finding: ScanReport["findings"][number]): boolean =>
+    !ignore.some(
+      (rule) =>
+        rule.kind === finding.kind &&
+        (rule.tool === undefined || rule.tool === finding.tool),
+    );
+  const findings = report.findings.filter(keep);
+  const kept: ScanReport = {
     ...report,
-    findings: report.findings.filter(
-      (finding) =>
-        !ignore.some(
-          (rule) =>
-            rule.kind === finding.kind &&
-            (rule.tool === undefined || rule.tool === finding.tool),
-        ),
-    ),
+    findings,
+    // The rows count what the report shows.
+    tools: report.tools.map((row) => ({
+      ...row,
+      findings: findings.filter((finding) => finding.tool === row.name).length,
+    })),
   };
   stdout.write(json ? formatScanJson(kept) : formatScan(kept));
-  const ignored = report.findings.length - kept.findings.length;
+  const ignored = report.findings.length - findings.length;
   if (ignored > 0) {
     stderr.write(
       `note: ${ignored} ${ignored === 1 ? "finding" : "findings"} left out by --ignore\n`,
     );
   }
-  const totals = scanTotals(kept.findings);
+  if (planOnly) return 0;
+  // A scan in which no tool gave a result for a plain call tested nothing.
+  // That is not a clean scan, and it does not exit as one.
+  const exercised = kept.tools.some(
+    (row) => row.status === "scanned" && row.plain === "answered",
+  );
+  if (!exercised && findings.length === 0 && failOn !== "none") {
+    stderr.write(
+      "no tool answered a plain call, so nothing was tested. A tool may need a variable from --env, or the server may want arguments on its command line\n",
+    );
+    return 2;
+  }
+  const totals = scanTotals(findings);
   const bad =
     failOn === "none"
       ? 0
@@ -976,6 +1007,9 @@ if (isDirectRun()) {
   for (const [signal, code] of [
     ["SIGINT", 130],
     ["SIGTERM", 143],
+    // A closed terminal. What the run started is in its own process group
+    // and would not hear of it otherwise.
+    ["SIGHUP", 129],
   ] as const) {
     process.once(signal, () => {
       runCleanups();
